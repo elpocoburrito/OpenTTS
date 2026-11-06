@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Parsed by the framework (TtsEngines.settingsActivityFromServiceInfo) to find
+  the engine's configuration screen. Tag name "tts-engine" and the
+  android:settingsActivity attribute are required by the platform.
+-->
+<tts-engine xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="com.opentts.engine.SettingsActivity" />

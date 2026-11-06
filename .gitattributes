@@ -1,0 +1,15 @@
+# Normalise line endings in the repository.
+* text=auto
+
+# Keep the Gradle wrapper shell script executable on every platform.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Windows batch files must stay CRLF.
+*.bat text eol=crlf
+
+# Binary assets.
+*.jar binary
+*.png binary
+*.webp binary
+*.jpg binary
