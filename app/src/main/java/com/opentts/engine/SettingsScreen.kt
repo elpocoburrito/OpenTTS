@@ -7,6 +7,8 @@ import android.speech.tts.TextToSpeech
 import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -59,7 +61,7 @@ private const val TAG = "OpenTTS"
 private const val TEST_PHRASE =
     "Hello from OpenTTS. This is a test of the OpenRouter speech engine."
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(store: SettingsStore) {
     val context = LocalContext.current
@@ -137,22 +139,32 @@ fun SettingsScreen(store: SettingsStore) {
             )
 
             Text("Backend", style = MaterialTheme.typography.labelLarge)
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Three chips do not fit one row on a phone; FlowRow wraps them.
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 FilterChip(
                     selected = settings.backend == TtsSettings.BACKEND_LOCAL,
                     onClick = { update(settings.copy(backend = TtsSettings.BACKEND_LOCAL)) },
                     label = { Text("On device (ONNX)") },
                 )
-                Spacer(Modifier.width(8.dp))
                 FilterChip(
                     selected = settings.backend == TtsSettings.BACKEND_CLOUD,
                     onClick = { update(settings.copy(backend = TtsSettings.BACKEND_CLOUD)) },
                     label = { Text("OpenRouter (cloud)") },
                 )
+                FilterChip(
+                    selected = settings.backend == TtsSettings.BACKEND_SERVER,
+                    onClick = { update(settings.copy(backend = TtsSettings.BACKEND_SERVER)) },
+                    label = { Text("Self-hosted server") },
+                )
             }
 
             if (settings.backend == TtsSettings.BACKEND_LOCAL) {
                 LocalModelsSection(settings) { update(it) }
+            } else if (settings.backend == TtsSettings.BACKEND_SERVER) {
+                ServerSection(settings) { update(it) }
             } else {
                 OutlinedTextField(
                     value = settings.apiKey,

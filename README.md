@@ -1,11 +1,14 @@
 # OpenTTS NG
 
-An Android **Text-to-Speech engine** with two interchangeable backends:
+An Android **Text-to-Speech engine** with three interchangeable backends:
 
 - **Cloud** — [OpenRouter](https://openrouter.ai) `/audio/speech` models (the
   original OpenTTS behaviour).
 - **On device** — local ONNX models running through ONNX Runtime. No API key,
   no network, nothing leaves the phone.
+- **Self-hosted server** — an [OpenTTS-SRV](../OpenTTS-SRV) instance on a GPU
+  machine (ONNX Runtime + CUDA). Works with a bearer token and optional mutual
+  TLS.
 
 Any app that uses the platform TTS API (Evie, Moon+ Reader, …) can speak
 through either backend; you pick one in the app.
@@ -57,6 +60,31 @@ Local voices are exposed to the framework as `local|<modelId>/<voiceId>`
 system voice picker. Selecting a local voice name overrides the stored backend
 for that utterance.
 
+## Self-hosted server backend
+
+Point the app at an [OpenTTS-SRV](../OpenTTS-SRV) instance and the phone becomes a
+thin client: text goes up, 16-bit PCM comes back, no model on the device.
+
+- **Server URL** — `http://192.168.1.10:8420` on the LAN, or the hostname/port of
+  the Caddy or NPM front end.
+- **Bearer token** — the server's `OPENTTS_API_TOKEN`.
+- **Connect / refresh** — `GET /health` + `GET /v1/models`; the model and voice
+  dropdowns are filled from what the server advertises, including whether the
+  model is already downloaded there.
+- **Mutual TLS** — import a PKCS#12 (`.p12`/`.pfx`, password supported) or a PEM
+  holding an unencrypted PKCS#8 private key plus its certificates. Extra
+  certificates in the bundle are trusted as a private CA, which is what a Caddy
+  or NPM setup with an internal CA needs. Files are copied into app-private
+  storage; only the client-certificate handshake uses them.
+
+Synthesis asks the server for `response_format=pcm` and streams the bytes
+straight into `SynthesisCallback`, taking the real sample rate from the
+`X-Sample-Rate` response header — no decoding, so latency is the server's
+synthesis time plus the network hop.
+
+Cleartext HTTP is enabled in the manifest so a plain-LAN server works without
+TLS; put Caddy in front when the server is reachable from outside.
+
 ## Project layout
 
 ```
@@ -74,6 +102,9 @@ app/src/main/java/com/opentts/engine/
   onnx/ModelStore.kt        Downloads, install/remove, progress flow
   onnx/LocalTtsEngine.kt    ONNX Runtime adapters + sentence splitter
   onnx/WavIo.kt             WAV writer used by the debug self-test
+  server/ServerClient.kt    HTTP client for OpenTTS-SRV (/v1/models, /v1/audio/speech)
+  server/ClientCertStore.kt PKCS#12 / PEM import, client-cert TLS context
+  ServerSection.kt          Server settings UI (URL, token, models, mTLS)
 app/src/main/cpp/
   CMakeLists.txt            NDK build: espeak-ng + JNI bridge
   phonemizer.cpp            text -> IPA over espeak-ng
@@ -139,3 +170,7 @@ Settings live in the `opentts` SharedPreferences file.
 | `catalog_json` | cached cloud model catalogue |
 | `local_model` | installed local model id, e.g. `kokoro-82m` |
 | `local_voice` | local voice id, e.g. `af_heart` |
+| `server_url` | OpenTTS-SRV base URL |
+| `server_token` | server bearer token |
+| `server_model` | model id on the server |
+| `server_voice` | voice id on the server |

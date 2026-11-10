@@ -24,6 +24,11 @@ data class TtsSettings(
     val localModelId: String = DEFAULT_LOCAL_MODEL,
     /** Voice id inside that model. */
     val localVoiceId: String = DEFAULT_LOCAL_VOICE,
+    /** Self-hosted OpenTTS-SRV: base URL, bearer token, model and voice. */
+    val serverUrl: String = "",
+    val serverToken: String = "",
+    val serverModel: String = "",
+    val serverVoice: String = "",
 ) {
     companion object {
         const val DEFAULT_MODEL = "hexgrad/kokoro-82m"
@@ -34,6 +39,7 @@ data class TtsSettings(
 
         const val BACKEND_CLOUD = "cloud"
         const val BACKEND_LOCAL = "local"
+        const val BACKEND_SERVER = "server"
         const val DEFAULT_LOCAL_MODEL = "kokoro-82m"
         const val DEFAULT_LOCAL_VOICE = "af_heart"
     }
@@ -62,6 +68,10 @@ class SettingsStore(context: Context) {
             ?: TtsSettings.DEFAULT_LOCAL_MODEL,
         localVoiceId = prefs.getString(KEY_LOCAL_VOICE, TtsSettings.DEFAULT_LOCAL_VOICE)
             ?: TtsSettings.DEFAULT_LOCAL_VOICE,
+        serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: "",
+        serverToken = prefs.getString(KEY_SERVER_TOKEN, "") ?: "",
+        serverModel = prefs.getString(KEY_SERVER_MODEL, "") ?: "",
+        serverVoice = prefs.getString(KEY_SERVER_VOICE, "") ?: "",
     )
 
     fun save(settings: TtsSettings) {
@@ -81,6 +91,10 @@ class SettingsStore(context: Context) {
             .putString(KEY_BACKEND, settings.backend)
             .putString(KEY_LOCAL_MODEL, settings.localModelId)
             .putString(KEY_LOCAL_VOICE, settings.localVoiceId)
+            .putString(KEY_SERVER_URL, settings.serverUrl)
+            .putString(KEY_SERVER_TOKEN, settings.serverToken)
+            .putString(KEY_SERVER_MODEL, settings.serverModel)
+            .putString(KEY_SERVER_VOICE, settings.serverVoice)
             .apply()
     }
 
@@ -101,5 +115,9 @@ class SettingsStore(context: Context) {
         private const val KEY_BACKEND = "backend"
         private const val KEY_LOCAL_MODEL = "local_model"
         private const val KEY_LOCAL_VOICE = "local_voice"
+        private const val KEY_SERVER_URL = "server_url"
+        private const val KEY_SERVER_TOKEN = "server_token"
+        private const val KEY_SERVER_MODEL = "server_model"
+        private const val KEY_SERVER_VOICE = "server_voice"
     }
 }

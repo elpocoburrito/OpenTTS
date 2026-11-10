@@ -11,6 +11,9 @@ import com.opentts.engine.onnx.LocalModelCatalog
 import com.opentts.engine.onnx.LocalTtsEngine
 import com.opentts.engine.onnx.ModelStore
 import com.opentts.engine.onnx.Phonemizer
+import com.opentts.engine.server.ClientCertStore
+import com.opentts.engine.server.ServerClient
+import com.opentts.engine.server.ServerException
 import java.io.File
 import java.util.Locale
 import kotlin.math.min
@@ -36,8 +39,9 @@ class OpenRouterTtsService : TextToSpeechService() {
     @Volatile
     private var cancelRequested = false
 
+    /** Either a cloud [SpeechStream] or a [ServerStream]; both are closeable. */
     @Volatile
-    private var activeStream: SpeechStream? = null
+    private var activeStream: AutoCloseable? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -76,17 +80,26 @@ class OpenRouterTtsService : TextToSpeechService() {
         // apps hand us the voice name they were configured with, and the
         // "local|model/voice" prefix is unambiguous.
         val requested = request.voiceName?.let { LocalVoiceKey.parse(it) }
+        val serverVoice = request.voiceName?.let { ServerVoiceKey.parse(it) }
         val settings = applyRequestOverrides(base, request)
 
         if (requested != null) {
             synthesizeLocal(requested.first, requested.second, text, settings.speed, callback)
             return
         }
-        if (settings.backend == TtsSettings.BACKEND_LOCAL) {
-            synthesizeLocal(settings.localModelId, settings.localVoiceId, text, settings.speed, callback)
+        if (serverVoice != null) {
+            synthesizeServer(settings, serverVoice.first, serverVoice.second, text, callback)
             return
         }
-        synthesizeCloud(settings, text, callback)
+        when (settings.backend) {
+            TtsSettings.BACKEND_LOCAL ->
+                synthesizeLocal(settings.localModelId, settings.localVoiceId, text, settings.speed, callback)
+
+            TtsSettings.BACKEND_SERVER ->
+                synthesizeServer(settings, settings.serverModel, settings.serverVoice, text, callback)
+
+            else -> synthesizeCloud(settings, text, callback)
+        }
     }
 
     private fun synthesizeCloud(settings: TtsSettings, text: String, callback: SynthesisCallback) {
@@ -192,6 +205,65 @@ class OpenRouterTtsService : TextToSpeechService() {
         }
     }
 
+    /**
+     * Streams 16-bit PCM from a self-hosted OpenTTS-SRV instance. The server is
+     * asked for `pcm`, so the bytes go straight to the framework — no decoder —
+     * and the true rate comes from the response headers.
+     */
+    private fun synthesizeServer(
+        settings: TtsSettings,
+        model: String,
+        voice: String,
+        text: String,
+        callback: SynthesisCallback,
+    ) {
+        if (settings.serverUrl.isBlank()) {
+            Log.e(TAG, "Server backend selected but no URL configured")
+            runCatching { callback.error() }
+            return
+        }
+        if (text.isBlank()) {
+            callback.start(24000, AudioFormat.ENCODING_PCM_16BIT, 1)
+            callback.done()
+            return
+        }
+
+        val started = System.currentTimeMillis()
+        try {
+            val client = ServerClient(
+                baseUrl = settings.serverUrl,
+                token = settings.serverToken,
+                certs = ClientCertStore.load(this),
+            )
+            val stream = client.openSpeech(
+                text = text,
+                model = model.ifBlank { TtsSettings.DEFAULT_LOCAL_MODEL },
+                voice = voice.ifBlank { null },
+                speed = settings.speed,
+            )
+            activeStream = stream
+            stream.use {
+                if (cancelRequested) return
+                AudioDecoder.streamPcm(
+                    input = stream.input,
+                    sampleRate = stream.sampleRate,
+                    channels = 1,
+                    callback = callback,
+                    isCancelled = { cancelRequested },
+                )
+            }
+            Log.d(TAG, "Server synthesis finished in ${System.currentTimeMillis() - started} ms")
+        } catch (e: ServerException) {
+            Log.e(TAG, "Server synthesis failed: ${e.message}")
+            runCatching { callback.error() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Server synthesis failed: ${e.message}", e)
+            runCatching { callback.error() }
+        } finally {
+            activeStream = null
+        }
+    }
+
     /** Converts float PCM to 16-bit mono little-endian and feeds the framework. */
     private fun emitPcm(
         callback: SynthesisCallback,
@@ -220,7 +292,10 @@ class OpenRouterTtsService : TextToSpeechService() {
         var result = base
 
         val voiceName = request.voiceName
-        if (!voiceName.isNullOrBlank() && LocalVoiceKey.parse(voiceName) == null) {
+        if (!voiceName.isNullOrBlank() &&
+            LocalVoiceKey.parse(voiceName) == null &&
+            ServerVoiceKey.parse(voiceName) == null
+        ) {
             parseVoiceName(voiceName)?.let { (model, voice) ->
                 result = result.copy(model = model, voice = voice)
             }
@@ -250,6 +325,13 @@ class OpenRouterTtsService : TextToSpeechService() {
             }
         }
 
+        // The configured server voice, if a server backend is in play.
+        if (settings.backend == TtsSettings.BACKEND_SERVER && settings.serverUrl.isNotBlank()) {
+            val model = settings.serverModel.ifBlank { TtsSettings.DEFAULT_LOCAL_MODEL }
+            val voice = settings.serverVoice.ifBlank { "default" }
+            names.add(ServerVoiceKey.format(model, voice))
+        }
+
         // Cloud voices from the cached catalogue.
         val models = ModelsRepository.fromJson(settings.catalogJson)
         val configured = models.firstOrNull { it.id == settings.model }
@@ -268,6 +350,11 @@ class OpenRouterTtsService : TextToSpeechService() {
         variant: String?,
     ): String {
         val settings = store.load()
+        if (settings.backend == TtsSettings.BACKEND_SERVER) {
+            val model = settings.serverModel.ifBlank { TtsSettings.DEFAULT_LOCAL_MODEL }
+            val voice = settings.serverVoice.ifBlank { "default" }
+            return ServerVoiceKey.format(model, voice)
+        }
         if (settings.backend == TtsSettings.BACKEND_LOCAL) {
             val pair = LocalModelCatalog.voice(settings.localModelId, settings.localVoiceId)
             val modelId = pair?.first?.id ?: TtsSettings.DEFAULT_LOCAL_MODEL
@@ -280,12 +367,24 @@ class OpenRouterTtsService : TextToSpeechService() {
     override fun onIsValidVoiceName(name: String?): Int {
         if (name == null) return TextToSpeech.ERROR
         if (LocalVoiceKey.parse(name) != null) return TextToSpeech.SUCCESS
+        if (ServerVoiceKey.parse(name) != null) return TextToSpeech.SUCCESS
         return if (parseVoiceName(name) != null) TextToSpeech.SUCCESS else TextToSpeech.ERROR
     }
 
     override fun onLoadVoice(name: String?): Int = onIsValidVoiceName(name)
 
     private fun createVoice(name: String): Voice {
+        val server = ServerVoiceKey.parse(name)
+        if (server != null) {
+            return Voice(
+                name,
+                Locale.US,
+                Voice.QUALITY_VERY_HIGH,
+                Voice.LATENCY_NORMAL,
+                /* requiresNetwork = */ true,
+                setOf("networkSynthesis", "serverSynthesis"),
+            )
+        }
         val local = LocalVoiceKey.parse(name)
         if (local != null) {
             val (model, voice) = LocalModelCatalog.voice(local.first, local.second)
@@ -350,5 +449,26 @@ object LocalVoiceKey {
         val voiceId = rest.substring(slash + 1)
         if (voiceId.isBlank()) return null
         return LocalModelCatalog.voice(modelId, voiceId)?.let { modelId to voiceId }
+    }
+}
+
+/**
+ * Framework voice names for a self-hosted server: `server|<model>/<voice>`.
+ * Kept separate from `local|` so a reading app can pin either backend.
+ */
+object ServerVoiceKey {
+    private const val PREFIX = "server"
+
+    fun format(modelId: String, voiceId: String): String = "$PREFIX|$modelId/$voiceId"
+
+    fun parse(name: String): Pair<String, String>? {
+        if (!name.startsWith("$PREFIX|")) return null
+        val rest = name.removePrefix("$PREFIX|")
+        val slash = rest.indexOf('/')
+        if (slash <= 0) return null
+        val model = rest.substring(0, slash)
+        val voice = rest.substring(slash + 1)
+        if (model.isBlank() || voice.isBlank()) return null
+        return model to voice
     }
 }
