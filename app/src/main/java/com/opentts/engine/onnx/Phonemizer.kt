@@ -31,10 +31,7 @@ object Phonemizer {
     fun ensure(context: Context): Boolean {
         if (initialized) return true
         return try {
-            if (!loaded) {
-                System.loadLibrary("opentts_tts")
-                loaded = true
-            }
+            loadLibrary()
             val dir = ensureDataDir(context)
             initialized = nativeInit(dir.absolutePath)
             if (!initialized) Log.e(TAG, "espeak-ng failed to initialise at $dir")
@@ -61,7 +58,22 @@ object Phonemizer {
         }
     }
 
-    fun version(): String = runCatching { nativeVersion() }.getOrDefault("unavailable")
+    /**
+     * espeak's version string. Only the shared library is loaded (not its 14 MB
+     * data directory), so this is safe to call from the settings UI.
+     */
+    fun version(): String = runCatching {
+        loadLibrary()
+        nativeVersion()
+    }.getOrDefault("unavailable")
+
+    @Synchronized
+    private fun loadLibrary() {
+        if (!loaded) {
+            System.loadLibrary("opentts_tts")
+            loaded = true
+        }
+    }
 
     /** Copies `assets/espeak-ng-data` into filesDir once per app update. */
     private fun ensureDataDir(context: Context): File {

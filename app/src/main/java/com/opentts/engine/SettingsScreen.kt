@@ -48,6 +48,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.opentts.engine.onnx.Phonemizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -261,8 +262,10 @@ fun SettingsScreen(store: SettingsStore) {
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { refreshModels() }, enabled = !loading) {
-                    Text(if (loading) "Loading…" else "Refresh models")
+                if (settings.backend == TtsSettings.BACKEND_CLOUD) {
+                    Button(onClick = { refreshModels() }, enabled = !loading) {
+                        Text(if (loading) "Loading…" else "Refresh models")
+                    }
                 }
                 OutlinedButton(onClick = { openTtsSettings(context) }) {
                     Text("System settings")
@@ -277,7 +280,11 @@ fun SettingsScreen(store: SettingsStore) {
 
             HorizontalDivider()
 
-            Text("Advanced", style = MaterialTheme.typography.labelLarge)
+            Text(
+                if (settings.backend == TtsSettings.BACKEND_LOCAL) "Local engine" else "Advanced",
+                style = MaterialTheme.typography.labelLarge,
+            )
+            if (settings.backend == TtsSettings.BACKEND_CLOUD) {
             OutlinedTextField(
                 value = settings.baseUrl,
                 onValueChange = { update(settings.copy(baseUrl = it.trim())) },
@@ -295,6 +302,12 @@ fun SettingsScreen(store: SettingsStore) {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
             )
+            } else {
+                Text(
+                    "espeak-ng " + Phonemizer.version() + " · ONNX Runtime, CPU, up to 4 threads",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
 
             Spacer(Modifier.height(24.dp))
         }

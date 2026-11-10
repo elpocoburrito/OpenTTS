@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project(openttsnative VERSION 1.0.0 LANGUAGES C CXX)
+# VERSION must match the vendored espeak-ng release: config.h.in takes
+# PACKAGE_VERSION from it, which is what espeak_Info() reports at runtime.
+project(openttsnative VERSION 1.52.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
