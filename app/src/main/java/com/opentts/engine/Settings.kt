@@ -18,6 +18,12 @@ data class TtsSettings(
     val useClientRate: Boolean = true,
     /** Cached JSON catalog of TTS models (see ModelsRepository). */
     val catalogJson: String = "",
+    /** "cloud" (OpenRouter) or "local" (on-device ONNX). */
+    val backend: String = BACKEND_CLOUD,
+    /** Installed local model id, see LocalModelCatalog. */
+    val localModelId: String = DEFAULT_LOCAL_MODEL,
+    /** Voice id inside that model. */
+    val localVoiceId: String = DEFAULT_LOCAL_VOICE,
 ) {
     companion object {
         const val DEFAULT_MODEL = "hexgrad/kokoro-82m"
@@ -25,6 +31,11 @@ data class TtsSettings(
         const val FORMAT_MP3 = "mp3"
         const val FORMAT_PCM = "pcm"
         const val DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+        const val BACKEND_CLOUD = "cloud"
+        const val BACKEND_LOCAL = "local"
+        const val DEFAULT_LOCAL_MODEL = "kokoro-82m"
+        const val DEFAULT_LOCAL_VOICE = "af_heart"
     }
 }
 
@@ -46,6 +57,11 @@ class SettingsStore(context: Context) {
         timeoutSec = prefs.getInt(KEY_TIMEOUT, 60),
         useClientRate = prefs.getBoolean(KEY_USE_CLIENT_RATE, true),
         catalogJson = prefs.getString(KEY_CATALOG, "") ?: "",
+        backend = prefs.getString(KEY_BACKEND, TtsSettings.BACKEND_CLOUD) ?: TtsSettings.BACKEND_CLOUD,
+        localModelId = prefs.getString(KEY_LOCAL_MODEL, TtsSettings.DEFAULT_LOCAL_MODEL)
+            ?: TtsSettings.DEFAULT_LOCAL_MODEL,
+        localVoiceId = prefs.getString(KEY_LOCAL_VOICE, TtsSettings.DEFAULT_LOCAL_VOICE)
+            ?: TtsSettings.DEFAULT_LOCAL_VOICE,
     )
 
     fun save(settings: TtsSettings) {
@@ -62,6 +78,9 @@ class SettingsStore(context: Context) {
             .putInt(KEY_TIMEOUT, settings.timeoutSec)
             .putBoolean(KEY_USE_CLIENT_RATE, settings.useClientRate)
             .putString(KEY_CATALOG, settings.catalogJson)
+            .putString(KEY_BACKEND, settings.backend)
+            .putString(KEY_LOCAL_MODEL, settings.localModelId)
+            .putString(KEY_LOCAL_VOICE, settings.localVoiceId)
             .apply()
     }
 
@@ -79,5 +98,8 @@ class SettingsStore(context: Context) {
         private const val KEY_TIMEOUT = "timeout"
         private const val KEY_USE_CLIENT_RATE = "use_client_rate"
         private const val KEY_CATALOG = "catalog_json"
+        private const val KEY_BACKEND = "backend"
+        private const val KEY_LOCAL_MODEL = "local_model"
+        private const val KEY_LOCAL_VOICE = "local_voice"
     }
 }

@@ -7,13 +7,34 @@ plugins {
 android {
     namespace = "com.opentts.engine"
     compileSdk = 36
+    ndkVersion = "27.1.12297006"
 
     defaultConfig {
         applicationId = "com.opentts.engine"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+
+        // Native code (espeak-ng) plus ONNX Runtime only ship for the ABIs a
+        // phone or an emulator actually need.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_shared")
+                cppFlags += listOf("-fexceptions", "-frtti")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -33,11 +54,16 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        // ONNX Runtime and libc++_shared are loaded straight from the APK.
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 }
@@ -58,4 +84,7 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.material3)
+
+    // Local, on-device TTS models (Kokoro / Piper / Matcha).
+    implementation(libs.onnxruntime.android)
 }

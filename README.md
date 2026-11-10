@@ -1,82 +1,125 @@
-# OpenTTS
+# OpenTTS NG
 
-An Android **Text-to-Speech engine** that synthesizes speech with
-[OpenRouter](https://openrouter.ai) TTS models, so any app that uses the
-platform TTS API (Evie, Moon+ Reader, etc.) can speak through OpenRouter.
+An Android **Text-to-Speech engine** with two interchangeable backends:
 
-## How it works
+- **Cloud** — [OpenRouter](https://openrouter.ai) `/audio/speech` models (the
+  original OpenTTS behaviour).
+- **On device** — local ONNX models running through ONNX Runtime. No API key,
+  no network, nothing leaves the phone.
 
-- Implements `android.speech.tts.TextToSpeechService` and registers the
-  `android.intent.action.TTS_SERVICE` intent filter.
-- Each utterance is POSTed to OpenRouter's OpenAI-compatible endpoint:
+Any app that uses the platform TTS API (Evie, Moon+ Reader, …) can speak
+through either backend; you pick one in the app.
 
-  ```
-  POST https://openrouter.ai/api/v1/audio/speech
-  { "model": "...", "input": "...", "voice": "...", "response_format": "mp3" | "pcm" }
-  ```
 
-- The response is a raw audio byte stream. PCM is streamed straight to the
-  caller; MP3 is decoded on-device with `MediaCodec` (the real sample rate and
-  channel count are read from the container).
-- `onStop()` disconnects the in-flight HTTP call, so reading apps can cut off
-  speech immediately (synthesis runs synchronously on the platform's synthesis
-  thread, as required by `TextToSpeechService`).
+## Local models
+
+| Model | Family | Size on disk | Languages | Licence |
+| --- | --- | --- | --- | --- |
+| Kokoro 82M | StyleTTS2 → ONNX (int8) | 92 MB + 0.5 MB/voice | en, es, fr, hi, it, ja, pt, zh | Apache-2.0 |
+| Matcha · LJSpeech | Matcha + HiFiGAN vocoder | 78 MB | en | Apache-2.0 / MIT |
+| Piper · Lessac / Alan / Thorsten / Siwis / DaveFX | Piper VITS | 63 MB each | en-US, en-GB, de, fr, es | MIT / model-specific |
+
+Models are **downloaded on demand** from Hugging Face into
+`files/models/<id>/` and can be deleted again from the same screen. Nothing is
+bundled in the APK (which stays ~35 MB, mostly ONNX Runtime + espeak data).
+
+### How local synthesis works
+
+```
+text ──► SentenceSplitter ──► espeak-ng (JNI) ──► IPA phonemes
+     ──► model adapter (Kokoro | Piper | Matcha) ──► float PCM
+     ──► 16-bit mono ──► SynthesisCallback.audioAvailable()
+```
+
+- **espeak-ng 1.52.0** is vendored (`app/src/main/cpp/espeak-ng`) and built with
+  the NDK, compiled without audio output, MBROLA, sonic or the async thread: we
+  only need `espeak_TextToPhonemes(..., espeakPHONEMES_IPA)`. Its data (~14 MB,
+  24 languages) is generated on the host with `espeak-ng --compile` and shipped
+  in `assets/espeak-ng-data`; it is unpacked into the app's files dir on first
+  use because espeak reads real files from disk.
+- Text is split at sentence boundaries (≤ 320 chars) so first audio arrives fast
+  and Kokoro's 510-row style matrix is never overrun. Adjacent fragments shorter
+  than 80 chars are merged to avoid paying model-startup cost per "Dr.".
+- **Kokoro**: `input_ids` + `style` (the row of `voices/<id>.bin` matching the
+  phoneme count) + `speed` → 24 kHz waveform.
+- **Piper/VITS**: espeak phoneme ids with BOS/pad/EOS interlacing + `scales`
+  (noise, 1/speed, noise_w) → 22.05 kHz audio.
+- **Matcha**: acoustic graph → 80-band mel → HiFiGAN `hifigan_v2.onnx` →
+  22.05 kHz audio.
+- Speed is applied inside the model (Kokoro `speed` tensor, Piper/Matcha
+  `length_scale = 1/speed`); the reading app's rate setting is folded in when
+  *use client rate* is enabled.
+
+### Voice names
+
+Local voices are exposed to the framework as `local|<modelId>/<voiceId>`
+(cloud voices stay `author/model|voice`), so both backends can coexist in the
+system voice picker. Selecting a local voice name overrides the stored backend
+for that utterance.
 
 ## Project layout
 
 ```
 app/src/main/java/com/opentts/engine/
-  OpenRouterTtsService.kt   TextToSpeechService implementation
-  OpenRouterClient.kt       HTTP client for /audio/speech
-  AudioDecoder.kt           PCM passthrough + MP3/container decode to PCM
-  ModelsRepository.kt       Loads/caches the TTS model catalogue
+  OpenRouterTtsService.kt   TextToSpeechService; routes cloud vs local
+  OpenRouterClient.kt       HTTP client for /audio/speech (cloud)
+  AudioDecoder.kt           PCM passthrough + MP3/container decode (cloud)
+  ModelsRepository.kt       Cloud model catalogue
   Settings.kt               SharedPreferences-backed configuration
   SettingsActivity.kt       Entry point / engine config activity
   SettingsScreen.kt         Compose settings UI
-app/src/main/res/xml/tts_engine.xml
-                            Declares the config activity to the framework
+  LocalModelsSection.kt     Local model manager UI (download/select/delete)
+  onnx/Phonemizer.kt        espeak-ng JNI wrapper + asset unpacking
+  onnx/LocalModels.kt       Model catalogue (Kokoro, Piper, Matcha)
+  onnx/ModelStore.kt        Downloads, install/remove, progress flow
+  onnx/LocalTtsEngine.kt    ONNX Runtime adapters + sentence splitter
+  onnx/WavIo.kt             WAV writer used by the debug self-test
+app/src/main/cpp/
+  CMakeLists.txt            NDK build: espeak-ng + JNI bridge
+  phonemizer.cpp            text -> IPA over espeak-ng
+  espeak-ng/                vendored espeak-ng 1.52.0 (GPL-3.0)
+app/src/main/assets/espeak-ng-data/   compiled espeak data (24 languages)
+app/src/main/res/xml/tts_engine.xml   Declares the config activity
 ```
 
-## Setup
+## Build
 
-1. Build and install:
+```sh
+./gradlew :app:installDebug
+```
 
-   ```sh
-   ./gradlew :app:installDebug
-   ```
+Requires the Android SDK (platform 36), NDK 27.1.12297006+, and CMake 3.22.
+ABIs built: `arm64-v8a` (phones) and `x86_64` (emulators).
 
-2. Open **OpenTTS**, paste your OpenRouter API key, tap **Refresh models**,
-   and choose a model + voice.
-3. In **Settings → Text-to-speech output** on the device, select
-   **OpenTTS (OpenRouter)** as the preferred engine.
-4. (Optional) Pick a specific OpenTTS voice inside your reading app.
+## Measured on an emulator (API 36, x86_64)
 
-## Notes
+| Model | Audio produced | Synthesis time | RTF |
+| --- | --- | --- | --- |
+| Kokoro 82M int8 | 5.5 s | 4.2 s (first call, includes model load) | ~0.77 |
+| Piper Lessac | 4.3 s | 0.17 s | ~0.04 |
+| Matcha + HiFiGAN | 2.4 s | 0.10 s | ~0.04 |
 
-- Engine discovery requires `android.intent.category.DEFAULT` on the
-  `TTS_SERVICE` intent filter: the framework enumerates engines with
-  `PackageManager.MATCH_DEFAULT_ONLY` and silently skips filters without it.
-- The settings screen is declared through an XML meta-data resource
-  (`res/xml/tts_engine.xml`, tag `tts-engine`, attr `android:settingsActivity`),
-  which is what the gear icon in the system TTS settings opens.
-- `response_format = mp3` is the default because it is self-describing and
-  universally supported (ElevenLabs, MiniMax, Fish Audio, ...). `pcm` avoids
-  decoding for lower latency but you must set the correct sample rate (most
-  providers use 24000 Hz); HeyGen and Gemini only return PCM, MiniMax only MP3.
-- Speed is only sent when it differs from `1.0`. If a provider rejects it with
-  HTTP 400, the request is retried once without the `speed` field and that model
-  is remembered for the rest of the process (openai-style models accept it,
-  ElevenLabs only accepts 0.7–1.2).
-- The catalogue is fetched from
-  `GET /api/v1/models?output_modalities=speech` (38 models at the time of
-  writing) and cached in preferences.
+Output was cross-checked against the same pipeline run on the host with an
+identical sentence: Kokoro 143,400 host vs 144,600 device samples (0.8 %),
+Matcha 54,016 vs 53,760 (0.5 %).
 
-## Configuration keys
+## Notes / limits
+
+- One ONNX session is cached; switching models reloads the graph.
+- espeak is not thread-safe, so every JNI entry point takes a single mutex.
+- StyleTTS2 itself is **not** included: the published ONNX exports have
+  undocumented, opaque I/O. Kokoro is the supported StyleTTS2-lineage model.
+- No GPU/NNAPI execution provider yet; CPU with up to 4 threads.
+- espeak-ng is GPL-3.0, therefore this app is distributed under GPL-3.0
+  (see `LICENSE`).
+
+## Cloud configuration keys
 
 Settings live in the `opentts` SharedPreferences file.
 
 | Key | Meaning |
 | --- | --- |
+| `backend` | `cloud` or `local` |
 | `api_key` | OpenRouter API key |
 | `model` | e.g. `hexgrad/kokoro-82m` |
 | `voice` | provider voice id, e.g. `af_heart` |
@@ -87,4 +130,6 @@ Settings live in the `opentts` SharedPreferences file.
 | `base_url` | API base URL (`https://openrouter.ai/api/v1`) |
 | `timeout` | HTTP read timeout in seconds |
 | `use_client_rate` | apply the caller's speech rate |
-| `catalog_json` | cached model catalogue |
+| `catalog_json` | cached cloud model catalogue |
+| `local_model` | installed local model id, e.g. `kokoro-82m` |
+| `local_voice` | local voice id, e.g. `af_heart` |

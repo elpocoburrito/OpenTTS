@@ -116,7 +116,7 @@ fun SettingsScreen(store: SettingsStore) {
     val voiceOptions = selectedModel?.voices.orEmpty()
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("OpenTTS") }) },
+        topBar = { TopAppBar(title = { Text("OpenTTS NG") }) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -126,84 +126,103 @@ fun SettingsScreen(store: SettingsStore) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "OpenRouter text-to-speech engine",
+                "Text-to-speech engine: OpenRouter cloud models or local ONNX models",
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
                 "Select OpenTTS in Settings → Text-to-speech output, then choose a voice in your " +
-                    "reading app (e.g. Evie). Every utterance is synthesized by OpenRouter.",
+                    "reading app (e.g. Evie).",
                 style = MaterialTheme.typography.bodySmall,
             )
 
-            OutlinedTextField(
-                value = settings.apiKey,
-                onValueChange = { update(settings.copy(apiKey = it.trim())) },
-                label = { Text("OpenRouter API key") },
-                singleLine = true,
-                visualTransformation = if (showKey) {
-                    VisualTransformation.None
-                } else {
-                    PasswordVisualTransformation()
-                },
-                trailingIcon = {
-                    TextButton(onClick = { showKey = !showKey }) {
-                        Text(if (showKey) "Hide" else "Show")
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            DropdownField(
-                label = "Model",
-                options = models.map { it.id },
-                selected = settings.model,
-                onSelect = { id ->
-                    val voice = models.firstOrNull { it.id == id }?.voices?.firstOrNull() ?: ""
-                    update(settings.copy(model = id, voice = voice))
-                },
-            )
-
-            DropdownField(
-                label = "Voice (${voiceOptions.size} available)",
-                options = voiceOptions,
-                selected = settings.voice,
-                onSelect = { update(settings.copy(voice = it)) },
-            )
-
-            Text("Audio format", style = MaterialTheme.typography.labelLarge)
+            Text("Backend", style = MaterialTheme.typography.labelLarge)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 FilterChip(
-                    selected = settings.format == TtsSettings.FORMAT_MP3,
-                    onClick = { update(settings.copy(format = TtsSettings.FORMAT_MP3)) },
-                    label = { Text("MP3 (reliable)") },
+                    selected = settings.backend == TtsSettings.BACKEND_LOCAL,
+                    onClick = { update(settings.copy(backend = TtsSettings.BACKEND_LOCAL)) },
+                    label = { Text("On device (ONNX)") },
                 )
                 Spacer(Modifier.width(8.dp))
                 FilterChip(
-                    selected = settings.format == TtsSettings.FORMAT_PCM,
-                    onClick = { update(settings.copy(format = TtsSettings.FORMAT_PCM)) },
-                    label = { Text("PCM (low latency)") },
+                    selected = settings.backend == TtsSettings.BACKEND_CLOUD,
+                    onClick = { update(settings.copy(backend = TtsSettings.BACKEND_CLOUD)) },
+                    label = { Text("OpenRouter (cloud)") },
                 )
             }
-            Text(
-                if (settings.format == TtsSettings.FORMAT_PCM) {
-                    "Raw PCM is streamed with no decoding. The sample rate below must match the " +
-                        "model's output (most use 24000 Hz)."
-                } else {
-                    "MP3 is decoded on device, so the sample rate is detected automatically."
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-            if (settings.format == TtsSettings.FORMAT_PCM) {
+
+            if (settings.backend == TtsSettings.BACKEND_LOCAL) {
+                LocalModelsSection(settings) { update(it) }
+            } else {
                 OutlinedTextField(
-                    value = settings.sampleRate.toString(),
-                    onValueChange = { value ->
-                        value.toIntOrNull()?.let { update(settings.copy(sampleRate = it)) }
-                    },
-                    label = { Text("PCM sample rate (Hz)") },
+                    value = settings.apiKey,
+                    onValueChange = { update(settings.copy(apiKey = it.trim())) },
+                    label = { Text("OpenRouter API key") },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    visualTransformation = if (showKey) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        TextButton(onClick = { showKey = !showKey }) {
+                            Text(if (showKey) "Hide" else "Show")
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
+
+                DropdownField(
+                    label = "Model",
+                    options = models.map { it.id },
+                    selected = settings.model,
+                    onSelect = { id ->
+                        val voice = models.firstOrNull { it.id == id }?.voices?.firstOrNull() ?: ""
+                        update(settings.copy(model = id, voice = voice))
+                    },
+                )
+
+                DropdownField(
+                    label = "Voice (${voiceOptions.size} available)",
+                    options = voiceOptions,
+                    selected = settings.voice,
+                    onSelect = { update(settings.copy(voice = it)) },
+                )
+
+                Text("Audio format", style = MaterialTheme.typography.labelLarge)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FilterChip(
+                        selected = settings.format == TtsSettings.FORMAT_MP3,
+                        onClick = { update(settings.copy(format = TtsSettings.FORMAT_MP3)) },
+                        label = { Text("MP3 (reliable)") },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    FilterChip(
+                        selected = settings.format == TtsSettings.FORMAT_PCM,
+                        onClick = { update(settings.copy(format = TtsSettings.FORMAT_PCM)) },
+                        label = { Text("PCM (low latency)") },
+                    )
+                }
+                Text(
+                    if (settings.format == TtsSettings.FORMAT_PCM) {
+                        "Raw PCM is streamed with no decoding. The sample rate below must match the " +
+                            "model's output (most use 24000 Hz)."
+                    } else {
+                        "MP3 is decoded on device, so the sample rate is detected automatically."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (settings.format == TtsSettings.FORMAT_PCM) {
+                    OutlinedTextField(
+                        value = settings.sampleRate.toString(),
+                        onValueChange = { value ->
+                            value.toIntOrNull()?.let { update(settings.copy(sampleRate = it)) }
+                        },
+                        label = { Text("PCM sample rate (Hz)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
 
             Text(
@@ -226,18 +245,20 @@ fun SettingsScreen(store: SettingsStore) {
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            Text(
-                "Some models reject a non-default speed. Leave the slider at 1.00× if you see errors.",
-                style = MaterialTheme.typography.bodySmall,
-            )
+            if (settings.backend == TtsSettings.BACKEND_CLOUD) {
+                Text(
+                    "Some models reject a non-default speed. Leave the slider at 1.00× if you see errors.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
 
-            OutlinedTextField(
-                value = settings.instructions,
-                onValueChange = { update(settings.copy(instructions = it)) },
-                label = { Text("Delivery instructions (optional)") },
-                placeholder = { Text("e.g. warm and friendly") },
-                modifier = Modifier.fillMaxWidth(),
-            )
+                OutlinedTextField(
+                    value = settings.instructions,
+                    onValueChange = { update(settings.copy(instructions = it)) },
+                    label = { Text("Delivery instructions (optional)") },
+                    placeholder = { Text("e.g. warm and friendly") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { refreshModels() }, enabled = !loading) {
