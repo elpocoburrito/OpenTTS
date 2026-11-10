@@ -47,6 +47,11 @@ set_target_properties(espeak-ng PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
 # ---------------------------------------------------------------------------
 add_library(opentts_tts SHARED phonemizer.cpp)
 
+# 16 KB page alignment (Android 15+). The NDK argument above normally covers
+# this; setting it explicitly keeps the JNI object usable if the toolchain
+# default changes back.
+target_link_options(opentts_tts PRIVATE "-Wl,-z,max-page-size=16384")
+
 target_compile_options(opentts_tts PRIVATE -Wall -Wextra -fvisibility=hidden -O2)
 
 # Note: deliberately *not* linking the `espeak-include` interface target — it

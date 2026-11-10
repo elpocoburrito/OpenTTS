@@ -13,8 +13,8 @@ android {
         applicationId = "com.opentts.engine"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
 
         // Native code (espeak-ng) plus ONNX Runtime only ship for the ABIs a
         // phone or an emulator actually need.
@@ -24,8 +24,15 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments += listOf("-DANDROID_STL=c++_shared")
+                // Android 15+ devices use 16 KB memory pages;
+                // an APK whose native libs are only 4 KB aligned is refused at
+                // install time ("App not installed").
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
+                )
                 cppFlags += listOf("-fexceptions", "-frtti")
+                cFlags += listOf("-O2")
             }
         }
     }

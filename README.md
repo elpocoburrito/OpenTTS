@@ -110,6 +110,12 @@ Matcha 54,016 vs 53,760 (0.5 %).
 - StyleTTS2 itself is **not** included: the published ONNX exports have
   undocumented, opaque I/O. Kokoro is the supported StyleTTS2-lineage model.
 - No GPU/NNAPI execution provider yet; CPU with up to 4 threads.
+- Native libraries are built with 16 KB page alignment
+  (`ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON`, `-Wl,-z,max-page-size=16384`).
+  Android 15+ devices with 16 KB pages refuse to
+  install an APK whose `.so` files are only 4 KB aligned, with the generic
+  "App not installed" error. Verify with
+  `zipalign -c -P 16 -v 4 app-debug.apk` and `readelf -lW` (p_align `0x4000`).
 - espeak-ng is GPL-3.0, therefore this app is distributed under GPL-3.0
   (see `LICENSE`).
 
