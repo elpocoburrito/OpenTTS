@@ -86,7 +86,9 @@ class OpenRouterTtsService : TextToSpeechService() {
      */
     private fun warmLocalModel() {
         val settings = store.load()
-        if (settings.backend != TtsSettings.BACKEND_LOCAL) return
+        // Warmed even when another backend is selected: if that backend is
+        // unreachable, the fallback in onSynthesizeText uses this model and
+        // would otherwise pay the load on the reader's first utterance.
         val pair = LocalModelCatalog.voice(settings.localModelId, settings.localVoiceId) ?: return
         val (model, voice) = pair
         if (!localModels.isVoiceReady(model, voice)) return
