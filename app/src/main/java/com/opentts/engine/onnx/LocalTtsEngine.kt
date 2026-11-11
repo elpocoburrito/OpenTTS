@@ -23,10 +23,13 @@ class LocalTtsEngine(
     private val store: ModelStore,
     /** 0 = ask the tuner (measured on this device, once). */
     private val configuredThreads: () -> Int = { 0 },
+    // Guards the one-shot background benchmark; see resolveTuning().
     /** Called with the winning thread count / XNNPACK choice so they persist. */
     private val onThreadsTuned: (ThreadTuner.Result) -> Unit = {},
     private val xnnpackEnabled: () -> Boolean = { true },
 ) {
+
+    private val tuningRequested = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** A loaded, ready-to-run model. */
     interface Model : AutoCloseable {
@@ -61,13 +64,36 @@ class LocalTtsEngine(
      * Stored tuning wins; otherwise the device is benchmarked once (threads, then
      * XNNPACK) and the result persisted.
      */
+    /**
+     * Never benchmarks on a synthesis path.
+     *
+     * Tuning builds four sessions and runs timed inferences, which cost ~18 s on
+     * an emulator and ~30 s on a phone — long enough for a reading app to give up
+     * and report "speech error" on the very first utterance. So an untuned device
+     * synthesises immediately with a safe default and the benchmark runs in the
+     * background afterwards, persisting the winner for the next launch.
+     */
     private fun resolveTuning(model: LocalModelSpec, voice: LocalVoiceSpec): ThreadTuner.Result {
         val threads = configuredThreads()
         if (threads in 1..8) return ThreadTuner.Result(threads, xnnpackEnabled())
-        val result = ThreadTuner.tune(model, voice, store, onThreadsTuned)
-        Log.i(TAG, "thread tuner chose threads=${result.threads} xnnpack=${result.xnnpack}")
-        return result
+        scheduleTuning(model, voice)
+        return ThreadTuner.Result(defaultThreads(), xnnpack = false)
     }
+
+    /** Starts one background benchmark per process; later calls are no-ops. */
+    private fun scheduleTuning(model: LocalModelSpec, voice: LocalVoiceSpec) {
+        if (tuningRequested.compareAndSet(false, true)) {
+            Thread({
+                runCatching {
+                    val result = ThreadTuner.tune(model, voice, store, onThreadsTuned)
+                    Log.i(TAG, "background tuner chose threads=${result.threads} xnnpack=${result.xnnpack}")
+                }.onFailure { Log.w(TAG, "background tuner failed: ${it.message}") }
+            }, "opentts-tuner").start()
+        }
+    }
+
+    private fun defaultThreads(): Int =
+        Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
 
     /**
      * Loads the model and runs one short inference, so the first real utterance

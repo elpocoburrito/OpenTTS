@@ -22,13 +22,14 @@ internal class SynthesisCancelled : Exception("Synthesis cancelled")
  */
 object AudioDecoder {
 
+    /** Returns true when audio actually reached the client. */
     fun streamPcm(
         input: InputStream,
         sampleRate: Int,
         channels: Int,
         callback: SynthesisCallback,
         isCancelled: () -> Boolean,
-    ) {
+    ): Boolean {
         val target = CallbackTarget(callback)
         val sink = PcmSink(target, sampleRate, channels, isCancelled)
         val frameBytes = 2 * channels
@@ -43,17 +44,19 @@ object AudioDecoder {
             if (!sink.write(buffer, read)) {
                 // start() was refused or the caller cancelled mid-stream.
                 if (isCancelled()) throw SynthesisCancelled()
-                return
+                return sink.isStarted
             }
         }
         sink.finish()
+        return true
     }
 
+    /** Returns true when audio actually reached the client. */
     fun decodeFileToPcm(
         file: File,
         callback: SynthesisCallback,
         isCancelled: () -> Boolean,
-    ) {
+    ): Boolean {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -71,8 +74,7 @@ object AudioDecoder {
                 }
             }
             if (trackIndex < 0 || trackFormat == null) {
-                callback.error()
-                return
+                return false
             }
 
             extractor.selectTrack(trackIndex)
@@ -132,7 +134,11 @@ object AudioDecoder {
                 }
             }
 
-            if (sink.isStarted) sink.finish() else sink.error()
+            if (sink.isStarted) {
+                sink.finish()
+                return true
+            }
+            return false
         } finally {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }

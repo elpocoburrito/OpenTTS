@@ -294,6 +294,8 @@ fun SettingsScreen(store: SettingsStore) {
 
             TestSection()
 
+            DiagnosticsSection()
+
             status?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
@@ -377,6 +379,46 @@ private fun DropdownField(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Why the last utterance failed, if it did.
+ *
+ * Reading apps only say "speech error", so the engine records the reason and
+ * shows it here — the user can read it off the screen instead of pulling logs.
+ */
+@Composable
+private fun DiagnosticsSection() {
+    val context = LocalContext.current
+    var entries by remember { mutableStateOf(TtsDiagnostics.recent(context)) }
+    val last = entries.firstOrNull()
+
+    if (last == null) {
+        Text("No speech errors recorded.", style = MaterialTheme.typography.bodySmall)
+        return
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Last speech error", style = MaterialTheme.typography.labelLarge)
+            TextButton(onClick = {
+                TtsDiagnostics.clear(context)
+                entries = emptyList()
+            }) {
+                Text("Clear")
+            }
+        }
+        for (line in entries) {
+            Text(
+                line,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
     }
 }

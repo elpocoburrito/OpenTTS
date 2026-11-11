@@ -16,19 +16,24 @@ import com.opentts.engine.server.ServerClient
 import com.opentts.engine.server.ServerException
 import java.io.File
 import java.util.Locale
-import kotlin.math.min
 
 /**
- * Android text-to-speech engine with two interchangeable backends:
+ * Android text-to-speech engine with three interchangeable backends:
  *
  *  - **cloud** — OpenRouter's `/audio/speech` endpoint (the original behaviour).
  *  - **local** — on-device ONNX models (Kokoro 82M, Piper/VITS, Matcha) running
  *    through ONNX Runtime, with espeak-ng for phonemisation. No network at all.
+ *  - **server** — a self-hosted OpenTTS-SRV instance.
  *
  * The platform calls [onSynthesizeText] on its own dedicated synthesis thread and
- * requires it to be synchronous, so both paths run inline. Cancellation works
- * because [onStop] is invoked on another thread: the cloud path closes the live
- * HTTP stream, the local path flips a flag checked between audio buffers.
+ * requires it to be synchronous, so every path runs inline. Cancellation works
+ * because [onStop] is invoked on another thread: the streaming paths close the
+ * live HTTP connection, the local path checks a flag between audio buffers.
+ *
+ * Reading apps are unforgiving: they show "speech error" and move on, with no
+ * detail and no retry. So a failure here is never fatal on its own — a backend
+ * that cannot produce audio hands over to the next one, and the reason is
+ * recorded in [TtsDiagnostics] for the settings screen.
  */
 class OpenRouterTtsService : TextToSpeechService() {
 
@@ -58,9 +63,19 @@ class OpenRouterTtsService : TextToSpeechService() {
     @Volatile
     private var activeStream: AutoCloseable? = null
 
+    /** What a synthesis attempt achieved, so the caller can decide to fall over. */
+    private data class Outcome(val started: Boolean, val ok: Boolean) {
+        companion object {
+            val Failed = Outcome(started = false, ok = false)
+            fun delivered() = Outcome(started = true, ok = true)
+            /** Audio reached the client but something went wrong afterwards. */
+            fun aborted() = Outcome(started = true, ok = false)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "OpenTTS engine created (cloud + local backends)")
+        Log.i(TAG, "OpenTTS engine created (cloud + local + server backends)")
         warmLocalModel()
     }
 
@@ -109,54 +124,120 @@ class OpenRouterTtsService : TextToSpeechService() {
         cancelRequested = false
         val base = store.load()
         val text = (request.charSequenceText ?: request.text ?: "").toString()
+        val voiceName = request.voiceName
 
-        // A voice picked in the framework wins over the stored backend: reading
-        // apps hand us the voice name they were configured with, and the
-        // "local|model/voice" prefix is unambiguous.
-        val requested = request.voiceName?.let { LocalVoiceKey.parse(it) }
-        val serverVoice = request.voiceName?.let { ServerVoiceKey.parse(it) }
-        val settings = applyRequestOverrides(base, request)
+        try {
+            val settings = applyRequestOverrides(base, request)
+            Log.d(
+                TAG,
+                "synthesize: ${text.length} chars, backend=${settings.backend}, " +
+                    "voice=${voiceName ?: "(none)"}, maxBuffer=${callback.maxBufferSize}",
+            )
 
-        if (requested != null) {
-            synthesizeLocal(requested.first, requested.second, text, settings.speed, callback)
-            return
-        }
-        if (serverVoice != null) {
-            synthesizeServer(settings, serverVoice.first, serverVoice.second, text, callback)
-            return
-        }
-        when (settings.backend) {
-            TtsSettings.BACKEND_LOCAL ->
-                synthesizeLocal(settings.localModelId, settings.localVoiceId, text, settings.speed, callback)
+            if (text.isBlank()) {
+                callback.start(settings.sampleRate, AudioFormat.ENCODING_PCM_16BIT, settings.channels)
+                callback.done()
+                return
+            }
 
-            TtsSettings.BACKEND_SERVER ->
-                synthesizeServer(settings, settings.serverModel, settings.serverVoice, text, callback)
+            // 1. A voice name the reading app pinned wins over the stored backend,
+            //    but only when it can actually be served.
+            val pinnedLocal = voiceName?.let { LocalVoiceKey.parse(it) }
+            if (pinnedLocal != null) {
+                val (model, voice) = pinnedLocal
+                val outcome = synthesizeLocal(model, voice, text, settings.speed, callback)
+                if (outcome.ok) return
+                if (outcome.started) {
+                    callback.error()
+                    return
+                }
+                TtsDiagnostics.record(
+                    this,
+                    "pinned local voice $voiceName produced no audio (model not installed?)",
+                )
+            }
 
-            else -> synthesizeCloud(settings, text, callback)
+            val pinnedServer = voiceName?.let { ServerVoiceKey.parse(it) }
+            if (pinnedServer != null && settings.serverUrl.isNotBlank()) {
+                val (model, voice) = pinnedServer
+                val outcome = synthesizeServer(settings, model, voice, text, callback)
+                if (outcome.ok) return
+                if (outcome.started) {
+                    callback.error()
+                    return
+                }
+                TtsDiagnostics.record(this, "pinned server voice $voiceName produced no audio")
+            }
+
+            // 2. Stored backend first, then the others, so one misconfiguration
+            //    cannot leave a reading app with no voice at all.
+            for (backend in BackendFallback.order(settings.backend)) {
+                val outcome = when (backend) {
+                    TtsSettings.BACKEND_LOCAL -> synthesizeLocal(
+                        settings.localModelId,
+                        settings.localVoiceId,
+                        text,
+                        settings.speed,
+                        callback,
+                    )
+
+                    TtsSettings.BACKEND_SERVER -> synthesizeServer(
+                        settings,
+                        settings.serverModel,
+                        settings.serverVoice,
+                        text,
+                        callback,
+                    )
+
+                    else -> synthesizeCloud(settings, text, callback)
+                }
+                if (outcome.ok) return
+                if (outcome.started) {
+                    // Some audio already reached the client: appending a second
+                    // backend's stream would duplicate words, so stop here.
+                    TtsDiagnostics.record(this, "$backend stopped mid-utterance")
+                    callback.error()
+                    return
+                }
+                TtsDiagnostics.record(this, "$backend produced no audio; trying next backend")
+            }
+
+            TtsDiagnostics.record(
+                this,
+                "no backend could synthesize ${text.length} chars; " +
+                    "voice=${voiceName ?: "(none)"}; configure one in OpenTTS settings",
+            )
+            runCatching { callback.error() }
+        } catch (t: Throwable) {
+            // A Throwable that escapes here kills the process and the client sees
+            // only "error", so it is recorded and converted into a callback error.
+            TtsDiagnostics.record(
+                this,
+                "synthesis crashed: ${t.javaClass.simpleName}: ${t.message}",
+            )
+            runCatching { callback.error() }
         }
     }
 
-    private fun synthesizeCloud(settings: TtsSettings, text: String, callback: SynthesisCallback) {
+    private fun synthesizeCloud(
+        settings: TtsSettings,
+        text: String,
+        callback: SynthesisCallback,
+    ): Outcome {
         if (settings.apiKey.isBlank()) {
-            Log.w(TAG, "Cannot synthesize: no OpenRouter API key configured")
-            runCatching { callback.error() }
-            return
-        }
-
-        if (text.isBlank()) {
-            callback.start(settings.sampleRate, AudioFormat.ENCODING_PCM_16BIT, settings.channels)
-            callback.done()
-            return
+            TtsDiagnostics.record(this, "cloud backend skipped: no OpenRouter API key")
+            return Outcome.Failed
         }
 
         val started = System.currentTimeMillis()
-        try {
+        return try {
             val stream = OpenRouterClient(settings).openSpeech(text)
             activeStream = stream
+            var delivered = false
             stream.use {
-                if (cancelRequested) return
+                if (cancelRequested) return Outcome.Failed
                 Log.d(TAG, "Streaming ${settings.format} from ${settings.model}/${settings.voice}")
-                when (settings.format) {
+                delivered = when (settings.format) {
                     TtsSettings.FORMAT_PCM -> AudioDecoder.streamPcm(
                         input = stream.input,
                         sampleRate = settings.sampleRate,
@@ -177,11 +258,13 @@ class OpenRouterTtsService : TextToSpeechService() {
                 }
             }
             Log.d(TAG, "Cloud synthesis finished in ${System.currentTimeMillis() - started} ms")
+            if (delivered) Outcome.delivered() else Outcome.Failed
         } catch (e: SynthesisCancelled) {
-            Log.d(TAG, "Synthesis cancelled")
+            Log.d(TAG, "Cloud synthesis cancelled")
+            Outcome.Failed
         } catch (e: Exception) {
-            Log.e(TAG, "Synthesis failed: ${e.message}", e)
-            runCatching { callback.error() }
+            TtsDiagnostics.record(this, "cloud failed: ${e.message}")
+            Outcome.Failed
         } finally {
             activeStream = null
         }
@@ -193,47 +276,44 @@ class OpenRouterTtsService : TextToSpeechService() {
         text: String,
         speed: Float,
         callback: SynthesisCallback,
-    ) {
+    ): Outcome {
         val pair = LocalModelCatalog.voice(modelId, voiceId)
         if (pair == null) {
-            Log.e(TAG, "Unknown local model/voice: $modelId/$voiceId")
-            runCatching { callback.error() }
-            return
+            TtsDiagnostics.record(this, "unknown local model/voice: $modelId/$voiceId")
+            return Outcome.Failed
         }
         val (model, voice) = pair
 
         if (!localModels.isVoiceReady(model, voice)) {
-            Log.e(TAG, "Local model is not installed: ${model.id} (open OpenTTS to download it)")
-            runCatching { callback.error() }
-            return
+            TtsDiagnostics.record(this, "local model not installed: ${model.id}")
+            return Outcome.Failed
         }
         if (!Phonemizer.ensure(this)) {
-            Log.e(TAG, "espeak-ng unavailable, cannot phonemise locally")
-            runCatching { callback.error() }
-            return
-        }
-        if (text.isBlank()) {
-            callback.start(model.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
-            callback.done()
-            return
+            TtsDiagnostics.record(this, "espeak-ng unavailable, cannot phonemise locally")
+            return Outcome.Failed
         }
 
         val sink = PcmSink(CallbackTarget(callback), model.sampleRate, /* channels = */ 1) { cancelRequested }
         val began = System.currentTimeMillis()
-        try {
+        return try {
             localEngine.speak(text, model, voice, speed, isCancelled = { cancelRequested }) { samples ->
                 if (cancelRequested) return@speak false
                 sink.writeFloats(samples)
             }
-            Log.d(TAG, "Local synthesis finished in ${System.currentTimeMillis() - began} ms")
-            if (cancelRequested) return
-            sink.finish()
+            if (cancelRequested) {
+                Log.d(TAG, "Local synthesis cancelled")
+                if (sink.isStarted) Outcome.aborted() else Outcome.Failed
+            } else {
+                sink.finish()
+                Log.d(TAG, "Local synthesis finished in ${System.currentTimeMillis() - began} ms")
+                Outcome.delivered()
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Local synthesis failed: ${e.message}", e)
+            TtsDiagnostics.record(this, "local failed: ${e.message}")
             if (!sink.isStarted) runCatching {
                 callback.start(model.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
             }
-            runCatching { callback.error() }
+            if (sink.isStarted) Outcome.aborted() else Outcome.Failed
         }
     }
 
@@ -248,20 +328,14 @@ class OpenRouterTtsService : TextToSpeechService() {
         voice: String,
         text: String,
         callback: SynthesisCallback,
-    ) {
+    ): Outcome {
         if (settings.serverUrl.isBlank()) {
-            Log.e(TAG, "Server backend selected but no URL configured")
-            runCatching { callback.error() }
-            return
-        }
-        if (text.isBlank()) {
-            callback.start(24000, AudioFormat.ENCODING_PCM_16BIT, 1)
-            callback.done()
-            return
+            TtsDiagnostics.record(this, "server backend skipped: no URL configured")
+            return Outcome.Failed
         }
 
         val started = System.currentTimeMillis()
-        try {
+        return try {
             val client = ServerClient(
                 baseUrl = settings.serverUrl,
                 token = settings.serverToken,
@@ -274,9 +348,10 @@ class OpenRouterTtsService : TextToSpeechService() {
                 speed = settings.speed,
             )
             activeStream = stream
+            var delivered = false
             stream.use {
-                if (cancelRequested) return
-                AudioDecoder.streamPcm(
+                if (cancelRequested) return Outcome.Failed
+                delivered = AudioDecoder.streamPcm(
                     input = stream.input,
                     sampleRate = stream.sampleRate,
                     channels = 1,
@@ -285,26 +360,16 @@ class OpenRouterTtsService : TextToSpeechService() {
                 )
             }
             Log.d(TAG, "Server synthesis finished in ${System.currentTimeMillis() - started} ms")
+            if (delivered) Outcome.delivered() else Outcome.Failed
         } catch (e: ServerException) {
-            Log.e(TAG, "Server synthesis failed: ${e.message}")
-            runCatching { callback.error() }
+            TtsDiagnostics.record(this, "server failed: ${e.message}")
+            Outcome.Failed
         } catch (e: Exception) {
-            Log.e(TAG, "Server synthesis failed: ${e.message}", e)
-            runCatching { callback.error() }
+            TtsDiagnostics.record(this, "server failed: ${e.message}")
+            Outcome.Failed
         } finally {
             activeStream = null
         }
-    }
-
-    /** Converts float samples to 16-bit mono little-endian bytes. */
-    private fun floatsToPcm16(samples: FloatArray): ByteArray {
-        val bytes = ByteArray(samples.size * 2)
-        for (i in samples.indices) {
-            val v = (samples[i].coerceIn(-1f, 1f) * 32767f).toInt()
-            bytes[i * 2] = (v and 0xFF).toByte()
-            bytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
-        }
-        return bytes
     }
 
     /** Applies a per-utterance voice and (optionally) the caller's speech rate. */
@@ -331,26 +396,27 @@ class OpenRouterTtsService : TextToSpeechService() {
 
     // ---- Voices ------------------------------------------------------------
 
+    /**
+     * Every voice the engine can serve, installed or not.
+     *
+     * The framework caches this list and rejects `setVoice()` for a name that is
+     * absent, so it is never narrowed to what is currently downloaded: a reading
+     * app that pinned a local voice must still be able to select it — the
+     * fallback in [onSynthesizeText] deals with the model being missing.
+     */
     override fun onGetVoices(): MutableList<Voice> {
         val settings = store.load()
         val names = LinkedHashSet<String>()
 
-        // Every voice of every installed local model.
         for (model in LocalModelCatalog.all) {
-            if (!localModels.isInstalled(model)) continue
             for (voice in model.voices) {
-                if (localModels.isVoiceReady(model, voice)) {
-                    names.add(LocalVoiceKey.format(model.id, voice.id))
-                }
+                names.add(LocalVoiceKey.format(model.id, voice.id))
             }
         }
 
-        // The configured server voice, if a server backend is in play.
-        if (settings.backend == TtsSettings.BACKEND_SERVER && settings.serverUrl.isNotBlank()) {
-            val model = settings.serverModel.ifBlank { TtsSettings.DEFAULT_LOCAL_MODEL }
-            val voice = settings.serverVoice.ifBlank { "default" }
-            names.add(ServerVoiceKey.format(model, voice))
-        }
+        val serverModel = settings.serverModel.ifBlank { TtsSettings.DEFAULT_LOCAL_MODEL }
+        val serverVoice = settings.serverVoice.ifBlank { "default" }
+        names.add(ServerVoiceKey.format(serverModel, serverVoice))
 
         // Cloud voices from the cached catalogue.
         val models = ModelsRepository.fromJson(settings.catalogJson)
@@ -410,13 +476,15 @@ class OpenRouterTtsService : TextToSpeechService() {
             val (model, voice) = LocalModelCatalog.voice(local.first, local.second)
                 ?: return fallbackVoice(name)
             val locale = Locale.forLanguageTag(voice.language)
+            val features = mutableSetOf("localSynthesis", model.family.label)
+            if (!localModels.isVoiceReady(model, voice)) features.add("notInstalled")
             return Voice(
                 name,
                 if (locale.language.isBlank()) Locale.US else locale,
                 Voice.QUALITY_VERY_HIGH,
                 Voice.LATENCY_NORMAL,
                 /* requiresNetwork = */ false,
-                setOf("localSynthesis", model.family.label),
+                features,
             )
         }
         return Voice(
@@ -448,6 +516,24 @@ class OpenRouterTtsService : TextToSpeechService() {
             return model to voice
         }
     }
+}
+
+/**
+ * Order in which backends are tried for one utterance.
+ *
+ * The configured backend goes first; the rest follow so a missing API key, an
+ * unreachable server or an uninstalled model degrades to a working voice instead
+ * of surfacing "speech error" in the reading app.
+ */
+internal object BackendFallback {
+    private val all = listOf(
+        TtsSettings.BACKEND_LOCAL,
+        TtsSettings.BACKEND_SERVER,
+        TtsSettings.BACKEND_CLOUD,
+    )
+
+    fun order(preferred: String): List<String> =
+        listOf(preferred) + all.filter { it != preferred }
 }
 
 /**
