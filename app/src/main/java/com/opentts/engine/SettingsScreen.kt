@@ -58,8 +58,16 @@ import java.util.Locale
 
 private const val TAG = "OpenTTS"
 
+/**
+ * Long enough to produce several chunks and a few seconds of audio: short
+ * utterances hide stream problems that only show up after many buffers.
+ */
 private const val TEST_PHRASE =
-    "Hello from OpenTTS. This is a test of the OpenRouter speech engine."
+    "Hello from OpenTTS. This is a test of the text to speech engine. " +
+        "It reads a few sentences so that you can judge the voice, the pace, and the clarity. " +
+        "Numbers such as 2026, abbreviations like Dr. Smith, and punctuation all go through " +
+        "the same pipeline. If the audio stays clean all the way to the end of this paragraph, " +
+        "the sample stream is aligned correctly."
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
