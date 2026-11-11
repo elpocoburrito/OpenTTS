@@ -187,7 +187,7 @@ class OpenRouterTtsService : TextToSpeechService() {
         val sink = PcmSink(CallbackTarget(callback), model.sampleRate, /* channels = */ 1) { cancelRequested }
         val began = System.currentTimeMillis()
         try {
-            localEngine.speak(text, model, voice, speed) { samples ->
+            localEngine.speak(text, model, voice, speed, isCancelled = { cancelRequested }) { samples ->
                 if (cancelRequested) return@speak false
                 val bytes = floatsToPcm16(samples)
                 sink.write(bytes, bytes.size)

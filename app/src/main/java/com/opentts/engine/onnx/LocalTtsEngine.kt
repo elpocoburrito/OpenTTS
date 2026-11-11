@@ -69,28 +69,31 @@ class LocalTtsEngine(
         model: LocalModelSpec,
         voice: LocalVoiceSpec,
         speed: Float,
+        isCancelled: () -> Boolean = { false },
         onAudio: (FloatArray) -> Boolean,
     ): Int {
         val engine = load(model, voice)
         val chunks = SentenceSplitter.split(text)
         Log.i(TAG, "Local synthesis: ${chunks.size} chunk(s), model=${model.id}, voice=${voice.id}")
 
-        for (chunk in chunks) {
-            val phonemes = Phonemizer.phonemes(context, chunk, voice.espeakVoice)
-            if (phonemes.isBlank()) {
-                Log.w(TAG, "espeak produced no phonemes for: ${chunk.take(60)}")
-                continue
-            }
-            val started = System.currentTimeMillis()
-            val audio = engine.synthesize(phonemes, speed, voice.speakerId)
-            Log.d(
-                TAG,
-                "chunk ${chunk.length} chars -> ${audio.size} samples in " +
-                    "${System.currentTimeMillis() - started} ms",
-            )
-            if (audio.isEmpty()) continue
-            if (!onAudio(limitPeak(audio))) return engine.sampleRate
-        }
+        SynthesisPipeline(
+            chunks = chunks,
+            synthesize = { chunk ->
+                val phonemes = Phonemizer.phonemes(context, chunk, voice.espeakVoice)
+                if (phonemes.isBlank()) {
+                    Log.w(TAG, "espeak produced no phonemes for: ${chunk.take(60)}")
+                    FloatArray(0)
+                } else {
+                    limitPeak(engine.synthesize(phonemes, speed, voice.speakerId))
+                }
+            },
+            onAudio = onAudio,
+            isCancelled = isCancelled,
+            onChunk = { index, samples, millis ->
+                Log.d(TAG, "chunk $index: ${if (chunks.size > index) chunks[index].length else 0} chars -> $samples samples in $millis ms")
+            },
+        ).run()
+
         return engine.sampleRate
     }
 
