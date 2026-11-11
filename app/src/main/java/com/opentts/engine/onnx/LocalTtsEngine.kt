@@ -23,8 +23,9 @@ class LocalTtsEngine(
     private val store: ModelStore,
     /** 0 = ask the tuner (measured on this device, once). */
     private val configuredThreads: () -> Int = { 0 },
-    /** Called with the winning thread count so it can be persisted. */
-    private val onThreadsTuned: (Int) -> Unit = {},
+    /** Called with the winning thread count / XNNPACK choice so they persist. */
+    private val onThreadsTuned: (ThreadTuner.Result) -> Unit = {},
+    private val xnnpackEnabled: () -> Boolean = { true },
 ) {
 
     /** A loaded, ready-to-run model. */
@@ -43,19 +44,29 @@ class LocalTtsEngine(
         cached?.let { if (cachedKey == key) return it }
         close()
 
-        val loaded = AdapterFactory.build(model, voice, store, resolveThreads(model, voice))
+        val tuning = resolveTuning(model, voice)
+        val loaded = AdapterFactory.build(
+            model = model,
+            voice = voice,
+            store = store,
+            threads = tuning.threads,
+            xnnpack = tuning.xnnpack,
+        )
         cachedKey = key
         cached = loaded
         return loaded
     }
 
-    /** Uses the stored thread count, benchmarking once when it is still 0. */
-    private fun resolveThreads(model: LocalModelSpec, voice: LocalVoiceSpec): Int {
-        val configured = configuredThreads()
-        if (configured in 1..8) return configured
-        val best = ThreadTuner.tune(model, voice, store, onThreadsTuned)
-        Log.i(TAG, "thread tuner chose $best thread(s)")
-        return best
+    /**
+     * Stored tuning wins; otherwise the device is benchmarked once (threads, then
+     * XNNPACK) and the result persisted.
+     */
+    private fun resolveTuning(model: LocalModelSpec, voice: LocalVoiceSpec): ThreadTuner.Result {
+        val threads = configuredThreads()
+        if (threads in 1..8) return ThreadTuner.Result(threads, xnnpackEnabled())
+        val result = ThreadTuner.tune(model, voice, store, onThreadsTuned)
+        Log.i(TAG, "thread tuner chose threads=${result.threads} xnnpack=${result.xnnpack}")
+        return result
     }
 
     /**
@@ -159,11 +170,12 @@ internal class KokoroModel(
     private val voiceFile: File,
     override val sampleRate: Int,
     threads: Int = threads(),
+    xnnpack: Boolean = true,
 ) : LocalTtsEngine.Model {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
 
-    private val session: OrtSession = SessionFactory.create(File(dir, "model.onnx"), threads)
+    private val session: OrtSession = SessionFactory.create(File(dir, "model.onnx"), threads, xnnpack)
 
     /** char -> id, from the model's HF `tokenizer.json`. 115 IPA symbols. */
     private val vocab: Map<String, Int> = run {
@@ -235,6 +247,7 @@ internal class PiperModel(
     private val dir: File,
     override val sampleRate: Int,
     threads: Int = threads(),
+    xnnpack: Boolean = true,
 ) : LocalTtsEngine.Model {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
@@ -247,7 +260,7 @@ internal class PiperModel(
 
     private val onnxFile: File = dir.listFiles { f -> f.name.endsWith(".onnx") }!!.first()
 
-    private val session: OrtSession = SessionFactory.create(onnxFile, threads)
+    private val session: OrtSession = SessionFactory.create(onnxFile, threads, xnnpack)
 
     private val phonemeIds: Map<String, Int> = run {
         val map = config.getJSONObject("phoneme_id_map")
@@ -335,12 +348,13 @@ internal class MatchaModel(
     private val dir: File,
     override val sampleRate: Int,
     threads: Int = threads(),
+    xnnpack: Boolean = true,
 ) : LocalTtsEngine.Model {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
 
-    private val acoustic: OrtSession = SessionFactory.create(File(dir, "model.onnx"), threads)
-    private val vocoder: OrtSession = SessionFactory.create(File(dir, "vocoder.onnx"), threads)
+    private val acoustic: OrtSession = SessionFactory.create(File(dir, "model.onnx"), threads, xnnpack)
+    private val vocoder: OrtSession = SessionFactory.create(File(dir, "vocoder.onnx"), threads, xnnpack)
 
     /** tokens.txt from icefall: one symbol + id per line. */
     private val tokens: Map<String, Int> = run {

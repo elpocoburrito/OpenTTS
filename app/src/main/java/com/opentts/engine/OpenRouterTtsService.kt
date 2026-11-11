@@ -39,7 +39,15 @@ class OpenRouterTtsService : TextToSpeechService() {
             context = this,
             store = localModels,
             configuredThreads = { store.load().localThreads },
-            onThreadsTuned = { threads -> store.save(store.load().copy(localThreads = threads)) },
+            onThreadsTuned = { tuned ->
+                store.save(
+                    store.load().copy(
+                        localThreads = tuned.threads,
+                        localXnnpack = tuned.xnnpack,
+                    ),
+                )
+            },
+            xnnpackEnabled = { store.load().localXnnpack },
         )
     }
 

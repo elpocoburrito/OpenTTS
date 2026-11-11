@@ -26,6 +26,8 @@ data class TtsSettings(
     val localVoiceId: String = DEFAULT_LOCAL_VOICE,
     /** Measured intra-op thread count for local models; 0 = not tuned yet. */
     val localThreads: Int = 0,
+    /** XNNPACK execution provider for local models; measured slower here, off by default. */
+    val localXnnpack: Boolean = false,
     /** Self-hosted OpenTTS-SRV: base URL, bearer token, model and voice. */
     val serverUrl: String = "",
     val serverToken: String = "",
@@ -71,6 +73,7 @@ class SettingsStore(context: Context) {
         localVoiceId = prefs.getString(KEY_LOCAL_VOICE, TtsSettings.DEFAULT_LOCAL_VOICE)
             ?: TtsSettings.DEFAULT_LOCAL_VOICE,
         localThreads = prefs.getInt(KEY_LOCAL_THREADS, 0),
+        localXnnpack = prefs.getBoolean(KEY_LOCAL_XNNPACK, false),
         serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: "",
         serverToken = prefs.getString(KEY_SERVER_TOKEN, "") ?: "",
         serverModel = prefs.getString(KEY_SERVER_MODEL, "") ?: "",
@@ -95,6 +98,7 @@ class SettingsStore(context: Context) {
             .putString(KEY_LOCAL_MODEL, settings.localModelId)
             .putString(KEY_LOCAL_VOICE, settings.localVoiceId)
             .putInt(KEY_LOCAL_THREADS, settings.localThreads)
+            .putBoolean(KEY_LOCAL_XNNPACK, settings.localXnnpack)
             .putString(KEY_SERVER_URL, settings.serverUrl)
             .putString(KEY_SERVER_TOKEN, settings.serverToken)
             .putString(KEY_SERVER_MODEL, settings.serverModel)
@@ -120,6 +124,7 @@ class SettingsStore(context: Context) {
         private const val KEY_LOCAL_MODEL = "local_model"
         private const val KEY_LOCAL_VOICE = "local_voice"
         private const val KEY_LOCAL_THREADS = "local_threads"
+        private const val KEY_LOCAL_XNNPACK = "local_xnnpack"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_SERVER_TOKEN = "server_token"
         private const val KEY_SERVER_MODEL = "server_model"

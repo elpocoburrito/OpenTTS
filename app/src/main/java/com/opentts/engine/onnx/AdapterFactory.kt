@@ -9,14 +9,15 @@ internal object AdapterFactory {
         voice: LocalVoiceSpec,
         store: ModelStore,
         threads: Int,
+        xnnpack: Boolean = true,
     ): LocalTtsEngine.Model {
         val dir = store.modelDir(model.id)
         return when (model.family) {
             ModelFamily.KOKORO ->
-                KokoroModel(dir, store.voiceFile(model, voice) ?: error("no voice file"), model.sampleRate, threads)
+                KokoroModel(dir, store.voiceFile(model, voice) ?: error("no voice file"), model.sampleRate, threads, xnnpack)
 
-            ModelFamily.PIPER -> PiperModel(dir, model.sampleRate, threads)
-            ModelFamily.MATCHA -> MatchaModel(dir, model.sampleRate, threads)
+            ModelFamily.PIPER -> PiperModel(dir, model.sampleRate, threads, xnnpack)
+            ModelFamily.MATCHA -> MatchaModel(dir, model.sampleRate, threads, xnnpack)
         }
     }
 }
@@ -29,7 +30,7 @@ internal object AdapterFactory {
  * benchmark runs the real model on a fixed phoneme string, so the winner
  * reflects the actual graph rather than a synthetic matrix multiply.
  */
-internal object ThreadTuner {
+object ThreadTuner {
 
     private const val TAG = "ThreadTuner"
     private const val BENCH_PHONEMES =
@@ -38,40 +39,74 @@ internal object ThreadTuner {
     private const val WARMUP_RUNS = 1
     private const val TIMED_RUNS = 2
 
+    /** Winning combination for this device + model. */
+    data class Result(val threads: Int, val xnnpack: Boolean)
+
+    /**
+     * Measures intra-op thread counts first, then A/Bs XNNPACK at the winning
+     * count. XNNPACK is not automatically better: on the models shipped here it
+     * loses 7-16 % on tested ARM devices (int8 MatMuls are not XNNPACK kernels, so the
+     * graph gets partitioned with boundary copies), but a future model may
+     * differ, and this costs one extra session build to find out.
+     */
     fun tune(
         model: LocalModelSpec,
         voice: LocalVoiceSpec,
         store: ModelStore,
-        onTuned: (Int) -> Unit = {},
+        onTuned: (Result) -> Unit = {},
         candidates: List<Int> = defaultCandidates(),
-    ): Int {
-        val results = ArrayList<Pair<Int, Long>>()
+    ): Result {
+        val measured = ArrayList<Triple<Int, Boolean, Long>>()
 
         for (threads in candidates) {
-            val adapter = runCatching { AdapterFactory.build(model, voice, store, threads) }
-                .onFailure { Log.w(TAG, "threads=$threads could not build: ${it.message}") }
-                .getOrNull() ?: continue
-
-            try {
-                repeat(WARMUP_RUNS) { adapter.synthesize(BENCH_PHONEMES, 1f, voice.speakerId) }
-                val started = System.currentTimeMillis()
-                repeat(TIMED_RUNS) { adapter.synthesize(BENCH_PHONEMES, 1f, voice.speakerId) }
-                val elapsed = System.currentTimeMillis() - started
-                results.add(threads to elapsed)
-                Log.i(TAG, "threads=$threads -> ${elapsed} ms for $TIMED_RUNS runs")
-            } catch (e: Exception) {
-                Log.w(TAG, "threads=$threads benchmark failed: ${e.message}")
-            } finally {
-                runCatching { adapter.close() }
+            measure(model, voice, store, threads, xnnpack = false)?.let { (t, ms) ->
+                measured.add(Triple(t, false, ms))
             }
         }
+        val bestThreads = measured.minByOrNull { it.third }?.first ?: candidates.first()
 
-        val best = results.minByOrNull { it.second }?.first ?: candidates.first()
-        if (results.isNotEmpty()) {
-            Log.i(TAG, "best: $best thread(s) ${results.joinToString { "${it.first}:${it.second}ms" }}")
-            runCatching { onTuned(best) }
+        measure(model, voice, store, bestThreads, xnnpack = true)?.let { (t, ms) ->
+            measured.add(Triple(t, true, ms))
         }
-        return best
+
+        val winner = measured.minByOrNull { it.third }
+        val result = Result(winner?.first ?: bestThreads, winner?.second ?: false)
+
+        if (measured.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "best: threads=${result.threads} xnnpack=${result.xnnpack} " +
+                    measured.joinToString { "t${it.first}/xnn=${it.second}:${it.third}ms" },
+            )
+            runCatching { onTuned(result) }
+        }
+        return result
+    }
+
+    private fun measure(
+        model: LocalModelSpec,
+        voice: LocalVoiceSpec,
+        store: ModelStore,
+        threads: Int,
+        xnnpack: Boolean,
+    ): Pair<Int, Long>? {
+        val adapter = runCatching { AdapterFactory.build(model, voice, store, threads, xnnpack) }
+            .onFailure { Log.w(TAG, "t$threads/xnn=$xnnpack could not build: ${it.message}") }
+            .getOrNull() ?: return null
+
+        return try {
+            repeat(WARMUP_RUNS) { adapter.synthesize(BENCH_PHONEMES, 1f, voice.speakerId) }
+            val started = System.currentTimeMillis()
+            repeat(TIMED_RUNS) { adapter.synthesize(BENCH_PHONEMES, 1f, voice.speakerId) }
+            val elapsed = System.currentTimeMillis() - started
+            Log.i(TAG, "threads=$threads xnnpack=$xnnpack -> ${elapsed} ms for $TIMED_RUNS runs")
+            threads to elapsed
+        } catch (e: Exception) {
+            Log.w(TAG, "t$threads/xnn=$xnnpack benchmark failed: ${e.message}")
+            null
+        } finally {
+            runCatching { adapter.close() }
+        }
     }
 
     private fun defaultCandidates(): List<Int> {
