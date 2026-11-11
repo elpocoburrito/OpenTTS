@@ -21,6 +21,10 @@ import kotlin.math.min
 class LocalTtsEngine(
     private val context: Context,
     private val store: ModelStore,
+    /** 0 = ask the tuner (measured on this device, once). */
+    private val configuredThreads: () -> Int = { 0 },
+    /** Called with the winning thread count so it can be persisted. */
+    private val onThreadsTuned: (Int) -> Unit = {},
 ) {
 
     /** A loaded, ready-to-run model. */
@@ -39,15 +43,33 @@ class LocalTtsEngine(
         cached?.let { if (cachedKey == key) return it }
         close()
 
-        val dir = store.modelDir(model.id)
-        val loaded = when (model.family) {
-            ModelFamily.KOKORO -> KokoroModel(dir, store.voiceFile(model, voice)!!, model.sampleRate)
-            ModelFamily.PIPER -> PiperModel(dir, model.sampleRate)
-            ModelFamily.MATCHA -> MatchaModel(dir, model.sampleRate)
-        }
+        val loaded = AdapterFactory.build(model, voice, store, resolveThreads(model, voice))
         cachedKey = key
         cached = loaded
         return loaded
+    }
+
+    /** Uses the stored thread count, benchmarking once when it is still 0. */
+    private fun resolveThreads(model: LocalModelSpec, voice: LocalVoiceSpec): Int {
+        val configured = configuredThreads()
+        if (configured in 1..8) return configured
+        val best = ThreadTuner.tune(model, voice, store, onThreadsTuned)
+        Log.i(TAG, "thread tuner chose $best thread(s)")
+        return best
+    }
+
+    /**
+     * Loads the model and runs one short inference, so the first real utterance
+     * does not pay for graph construction, kernel selection and page faults.
+     */
+    fun warm(model: LocalModelSpec, voice: LocalVoiceSpec) {
+        val started = System.currentTimeMillis()
+        val engine = load(model, voice)
+        val phonemes = Phonemizer.phonemes(context, "warm up", voice.espeakVoice)
+        if (phonemes.isNotBlank()) {
+            runCatching { engine.synthesize(phonemes, 1f, voice.speakerId) }
+        }
+        Log.i(TAG, "warmed ${model.id}/${voice.id} in ${System.currentTimeMillis() - started} ms")
     }
 
     @Synchronized
@@ -76,6 +98,9 @@ class LocalTtsEngine(
         val chunks = SentenceSplitter.split(text)
         Log.i(TAG, "Local synthesis: ${chunks.size} chunk(s), model=${model.id}, voice=${voice.id}")
 
+        val started = System.currentTimeMillis()
+        var firstAudioLogged = false
+
         SynthesisPipeline(
             chunks = chunks,
             synthesize = { chunk ->
@@ -87,7 +112,13 @@ class LocalTtsEngine(
                     limitPeak(engine.synthesize(phonemes, speed, voice.speakerId))
                 }
             },
-            onAudio = onAudio,
+            onAudio = { samples ->
+                if (!firstAudioLogged) {
+                    firstAudioLogged = true
+                    Log.i(TAG, "first audio after ${System.currentTimeMillis() - started} ms")
+                }
+                onAudio(samples)
+            },
             isCancelled = isCancelled,
             onChunk = { index, samples, millis ->
                 Log.d(TAG, "chunk $index: ${if (chunks.size > index) chunks[index].length else 0} chars -> $samples samples in $millis ms")
@@ -115,6 +146,7 @@ class LocalTtsEngine(
 
     companion object {
         private const val TAG = "LocalTtsEngine"
+
     }
 }
 
@@ -122,21 +154,16 @@ class LocalTtsEngine(
 // Kokoro 82M — input_ids + style + speed -> waveform @ 24 kHz
 // ---------------------------------------------------------------------------
 
-private class KokoroModel(
+internal class KokoroModel(
     private val dir: File,
     private val voiceFile: File,
     override val sampleRate: Int,
+    threads: Int = threads(),
 ) : LocalTtsEngine.Model {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
 
-    private val session: OrtSession = env.createSession(
-        File(dir, "model.onnx").absolutePath,
-        OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(threads())
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-        },
-    )
+    private val session: OrtSession = SessionFactory.create(File(dir, "model.onnx"), threads)
 
     /** char -> id, from the model's HF `tokenizer.json`. 115 IPA symbols. */
     private val vocab: Map<String, Int> = run {
@@ -204,7 +231,11 @@ private class KokoroModel(
 // Piper / VITS — input + input_lengths + scales (+ sid) -> audio
 // ---------------------------------------------------------------------------
 
-private class PiperModel(private val dir: File, override val sampleRate: Int) : LocalTtsEngine.Model {
+internal class PiperModel(
+    private val dir: File,
+    override val sampleRate: Int,
+    threads: Int = threads(),
+) : LocalTtsEngine.Model {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
 
@@ -216,13 +247,7 @@ private class PiperModel(private val dir: File, override val sampleRate: Int) : 
 
     private val onnxFile: File = dir.listFiles { f -> f.name.endsWith(".onnx") }!!.first()
 
-    private val session: OrtSession = env.createSession(
-        onnxFile.absolutePath,
-        OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(threads())
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-        },
-    )
+    private val session: OrtSession = SessionFactory.create(onnxFile, threads)
 
     private val phonemeIds: Map<String, Int> = run {
         val map = config.getJSONObject("phoneme_id_map")
@@ -306,17 +331,16 @@ private class PiperModel(private val dir: File, override val sampleRate: Int) : 
 // Matcha — acoustic model -> 80-band mel -> HiFiGAN vocoder -> audio
 // ---------------------------------------------------------------------------
 
-private class MatchaModel(private val dir: File, override val sampleRate: Int) : LocalTtsEngine.Model {
+internal class MatchaModel(
+    private val dir: File,
+    override val sampleRate: Int,
+    threads: Int = threads(),
+) : LocalTtsEngine.Model {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
 
-    private fun options() = OrtSession.SessionOptions().apply {
-        setIntraOpNumThreads(threads())
-        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-    }
-
-    private val acoustic: OrtSession = env.createSession(File(dir, "model.onnx").absolutePath, options())
-    private val vocoder: OrtSession = env.createSession(File(dir, "vocoder.onnx").absolutePath, options())
+    private val acoustic: OrtSession = SessionFactory.create(File(dir, "model.onnx"), threads)
+    private val vocoder: OrtSession = SessionFactory.create(File(dir, "vocoder.onnx"), threads)
 
     /** tokens.txt from icefall: one symbol + id per line. */
     private val tokens: Map<String, Int> = run {

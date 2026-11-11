@@ -58,6 +58,9 @@ class ServerClient(
 
     private val base: String = baseUrl.trimEnd('/')
 
+    private var cachedModels: List<ServerModel>? = null
+    private var cachedModelsAt: Long = 0L
+
     private fun open(path: String, method: String): HttpURLConnection {
         val connection = URL("$base$path").openConnection() as HttpURLConnection
         connection.requestMethod = method
@@ -67,6 +70,11 @@ class ServerClient(
         connection.setRequestProperty("Authorization", "Bearer $token")
         connection.setRequestProperty("Accept", "application/json, audio/*")
         connection.setRequestProperty("User-Agent", "OpenTTS-NG")
+        // Keep the socket alive between utterances: a new connection (and on the
+        // TLS front end, a new handshake) costs more than a short sentence.
+        connection.setRequestProperty("Connection", "keep-alive")
+        // Audio is incompressible; gzip would only add CPU and latency.
+        connection.setRequestProperty("Accept-Encoding", "identity")
         if (connection is HttpsURLConnection) {
             certs?.socketFactory?.let { connection.sslSocketFactory = it }
             // Keep SNI/hostname verification on by default.
@@ -77,8 +85,17 @@ class ServerClient(
         return connection
     }
 
-    /** GET /v1/models — throws [ServerException] with a readable reason. */
-    fun listModels(): List<ServerModel> {
+    /** GET /v1/models, cached for [MODEL_CACHE_MS]; pass true to force a refresh. */
+    fun listModels(force: Boolean = false): List<ServerModel> {
+        val now = System.currentTimeMillis()
+        cachedModels?.let { if (!force && now - cachedModelsAt < MODEL_CACHE_MS) return it }
+        val fresh = fetchModels()
+        cachedModels = fresh
+        cachedModelsAt = now
+        return fresh
+    }
+
+    private fun fetchModels(): List<ServerModel> {
         val connection = open("/v1/models", "GET")
         try {
             val code = connection.responseCode
@@ -141,6 +158,9 @@ class ServerClient(
             if (!voice.isNullOrBlank()) put("voice", voice)
             put("response_format", "pcm")
             put("speed", speed.toDouble())
+            // Ask the server to emit sentence by sentence: playback starts after
+            // the first chunk instead of after the whole utterance.
+            put("stream", true)
         }.toString().toByteArray()
 
         return try {
@@ -186,5 +206,7 @@ class ServerClient(
 
     companion object {
         private const val TAG = "ServerClient"
+        /** Model lists change when the operator installs something; 5 minutes is plenty. */
+        private const val MODEL_CACHE_MS = 5 * 60 * 1000L
     }
 }

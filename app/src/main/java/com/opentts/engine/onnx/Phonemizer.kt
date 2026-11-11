@@ -17,6 +17,7 @@ object Phonemizer {
 
     private const val TAG = "Phonemizer"
     private const val DATA_DIR_NAME = "espeak-ng-data"
+    private const val CACHE_ENTRIES = 256
 
     @Volatile
     private var loaded = false
@@ -43,20 +44,39 @@ object Phonemizer {
     }
 
     /**
+     * Small LRU of recent phonemisations. Reading apps repeat short strings
+     * (menu items, "Chapter 4", page headers) and espeak costs a JNI round trip
+     * plus dictionary lookups each time.
+     */
+    private val cache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean =
+            size > CACHE_ENTRIES
+    }
+
+    /**
      * IPA phonemes for [text], phonemised with the espeak language [voice]
      * (e.g. "en-us", "de", "cmn"). Empty string when the engine is unavailable.
      */
     fun phonemes(context: Context, text: String, voice: String): String {
         if (text.isBlank()) return ""
+
+        val key = voice + "\u0000" + text
+        synchronized(cache) { cache[key] }?.let { return it }
+
         if (!ensure(context)) return ""
-        return synchronized(this) {
+        val result = synchronized(this) {
             if (nativeSetVoice(voice) != 0) {
                 Log.w(TAG, "espeak has no voice '$voice', falling back to en-us")
                 nativeSetVoice("en-us")
             }
             nativeTextToPhonemes(text)
         }
+        if (result.isNotEmpty()) synchronized(cache) { cache[key] = result }
+        return result
     }
+
+    /** Exposed for the settings screen: number of cached phonemisations. */
+    fun cacheSize(): Int = synchronized(cache) { cache.size }
 
     /**
      * espeak's version string. Only the shared library is loaded (not its 14 MB

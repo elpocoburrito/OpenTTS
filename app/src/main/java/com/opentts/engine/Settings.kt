@@ -24,6 +24,8 @@ data class TtsSettings(
     val localModelId: String = DEFAULT_LOCAL_MODEL,
     /** Voice id inside that model. */
     val localVoiceId: String = DEFAULT_LOCAL_VOICE,
+    /** Measured intra-op thread count for local models; 0 = not tuned yet. */
+    val localThreads: Int = 0,
     /** Self-hosted OpenTTS-SRV: base URL, bearer token, model and voice. */
     val serverUrl: String = "",
     val serverToken: String = "",
@@ -68,6 +70,7 @@ class SettingsStore(context: Context) {
             ?: TtsSettings.DEFAULT_LOCAL_MODEL,
         localVoiceId = prefs.getString(KEY_LOCAL_VOICE, TtsSettings.DEFAULT_LOCAL_VOICE)
             ?: TtsSettings.DEFAULT_LOCAL_VOICE,
+        localThreads = prefs.getInt(KEY_LOCAL_THREADS, 0),
         serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: "",
         serverToken = prefs.getString(KEY_SERVER_TOKEN, "") ?: "",
         serverModel = prefs.getString(KEY_SERVER_MODEL, "") ?: "",
@@ -91,6 +94,7 @@ class SettingsStore(context: Context) {
             .putString(KEY_BACKEND, settings.backend)
             .putString(KEY_LOCAL_MODEL, settings.localModelId)
             .putString(KEY_LOCAL_VOICE, settings.localVoiceId)
+            .putInt(KEY_LOCAL_THREADS, settings.localThreads)
             .putString(KEY_SERVER_URL, settings.serverUrl)
             .putString(KEY_SERVER_TOKEN, settings.serverToken)
             .putString(KEY_SERVER_MODEL, settings.serverModel)
@@ -115,6 +119,7 @@ class SettingsStore(context: Context) {
         private const val KEY_BACKEND = "backend"
         private const val KEY_LOCAL_MODEL = "local_model"
         private const val KEY_LOCAL_VOICE = "local_voice"
+        private const val KEY_LOCAL_THREADS = "local_threads"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_SERVER_TOKEN = "server_token"
         private const val KEY_SERVER_MODEL = "server_model"

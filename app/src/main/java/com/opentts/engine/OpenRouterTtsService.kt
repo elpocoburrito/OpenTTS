@@ -34,7 +34,14 @@ class OpenRouterTtsService : TextToSpeechService() {
 
     private val store by lazy { SettingsStore(this) }
     private val localModels by lazy { ModelStore(this) }
-    private val localEngine by lazy { LocalTtsEngine(this, localModels) }
+    private val localEngine by lazy {
+        LocalTtsEngine(
+            context = this,
+            store = localModels,
+            configuredThreads = { store.load().localThreads },
+            onThreadsTuned = { threads -> store.save(store.load().copy(localThreads = threads)) },
+        )
+    }
 
     @Volatile
     private var cancelRequested = false
@@ -46,6 +53,25 @@ class OpenRouterTtsService : TextToSpeechService() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "OpenTTS engine created (cloud + local backends)")
+        warmLocalModel()
+    }
+
+    /**
+     * Loads the selected local model in the background at service start. Latency
+     * for the first utterance drops from seconds to nothing, and the thread
+     * tuner runs while nothing is waiting on it.
+     */
+    private fun warmLocalModel() {
+        val settings = store.load()
+        if (settings.backend != TtsSettings.BACKEND_LOCAL) return
+        val pair = LocalModelCatalog.voice(settings.localModelId, settings.localVoiceId) ?: return
+        val (model, voice) = pair
+        if (!localModels.isVoiceReady(model, voice)) return
+
+        Thread({
+            runCatching { localEngine.warm(model, voice) }
+                .onFailure { Log.w(TAG, "warm-up failed: ${it.message}") }
+        }, "opentts-warmup").start()
     }
 
     // ---- Language handling -------------------------------------------------
@@ -189,8 +215,7 @@ class OpenRouterTtsService : TextToSpeechService() {
         try {
             localEngine.speak(text, model, voice, speed, isCancelled = { cancelRequested }) { samples ->
                 if (cancelRequested) return@speak false
-                val bytes = floatsToPcm16(samples)
-                sink.write(bytes, bytes.size)
+                sink.writeFloats(samples)
             }
             Log.d(TAG, "Local synthesis finished in ${System.currentTimeMillis() - began} ms")
             if (cancelRequested) return

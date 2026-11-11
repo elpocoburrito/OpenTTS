@@ -132,6 +132,26 @@ internal class PcmSink(
     }
 
     /** Ends the utterance. */
+    /** Reusable buffer for the float -> int16 conversion (no per-chunk garbage). */
+    private var scratch = ByteArray(0)
+
+    /**
+     * Converts and writes float samples in [-1, 1] directly, without an
+     * intermediate ShortArray or a second full-size copy.
+     */
+    fun writeFloats(samples: FloatArray): Boolean {
+        if (samples.isEmpty()) return true
+        val needed = samples.size * 2
+        if (scratch.size < needed) scratch = ByteArray(needed)
+        val buf = scratch
+        for (i in samples.indices) {
+            val v = (samples[i].coerceIn(-1f, 1f) * 32767f).toInt()
+            buf[i * 2] = (v and 0xFF).toByte()
+            buf[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        return write(buf, needed)
+    }
+
     fun finish() {
         if (!started && !startIfNeeded()) {
             target.error()
