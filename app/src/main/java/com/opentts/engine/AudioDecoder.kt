@@ -1,11 +1,9 @@
 package com.opentts.engine
 
-import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.speech.tts.SynthesisCallback
-import android.speech.tts.TextToSpeech
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -16,10 +14,11 @@ internal class SynthesisCancelled : Exception("Synthesis cancelled")
 /**
  * Feeds audio to a [SynthesisCallback].
  *
- * PCM responses are streamed straight through. MP3 responses are decoded with
- * [MediaExtractor] + [MediaCodec], which correctly parses the container (ID3
- * tags and frame boundaries) and reports the real sample rate and channel
- * count instead of us guessing them.
+ * PCM responses are streamed straight through a [PcmSink], which keeps sample
+ * alignment intact even when the source hands us odd-length reads (a dropped
+ * trailing byte used to byte-swap every later sample — loud white noise). MP3
+ * responses are decoded with [MediaExtractor] + [MediaCodec], which parses the
+ * container correctly and reports the real sample rate and channel count.
  */
 object AudioDecoder {
 
@@ -30,25 +29,24 @@ object AudioDecoder {
         callback: SynthesisCallback,
         isCancelled: () -> Boolean,
     ) {
-        val maxBuffer = callback.maxBufferSize()
-        val buffer = ByteArray(minOf(maxBuffer, 16 * 1024))
-        var started = false
+        val target = CallbackTarget(callback)
+        val sink = PcmSink(target, sampleRate, channels, isCancelled)
+        val frameBytes = 2 * channels
+        val bufferSize = (minOf(target.maxBufferSize(), 16 * 1024) / frameBytes).coerceAtLeast(1) * frameBytes
+        val buffer = ByteArray(bufferSize)
+
         while (true) {
             if (isCancelled()) throw SynthesisCancelled()
             val read = input.read(buffer)
             if (read < 0) break
             if (read == 0) continue
-            if (!started) {
-                if (callback.start(sampleRate, AudioFormat.ENCODING_PCM_16BIT, channels) !=
-                    TextToSpeech.SUCCESS
-                ) {
-                    return
-                }
-                started = true
+            if (!sink.write(buffer, read)) {
+                // start() was refused or the caller cancelled mid-stream.
+                if (isCancelled()) throw SynthesisCancelled()
+                return
             }
-            emit(callback, buffer, read, isCancelled)
         }
-        if (started) callback.done()
+        sink.finish()
     }
 
     fun decodeFileToPcm(
@@ -85,8 +83,8 @@ object AudioDecoder {
 
             val sampleRate = trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             val channelCount = trackFormat.intOr(MediaFormat.KEY_CHANNEL_COUNT, 1)
+            val sink = PcmSink(CallbackTarget(callback), sampleRate, channelCount, isCancelled)
 
-            var started = false
             val info = MediaCodec.BufferInfo()
             var inputDone = false
             var outputDone = false
@@ -116,24 +114,15 @@ object AudioDecoder {
                     MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
 
                     else -> if (outIndex >= 0) {
-                        if (!started) {
-                            if (callback.start(
-                                    sampleRate,
-                                    AudioFormat.ENCODING_PCM_16BIT,
-                                    channelCount,
-                                ) != TextToSpeech.SUCCESS
-                            ) {
-                                return
-                            }
-                            started = true
-                        }
                         if (info.size > 0) {
                             val outBuffer = codec.getOutputBuffer(outIndex)!!
                             outBuffer.position(info.offset)
                             outBuffer.limit(info.offset + info.size)
                             val bytes = ByteArray(info.size)
                             outBuffer.get(bytes)
-                            emit(callback, bytes, bytes.size, isCancelled)
+                            if (!sink.write(bytes, bytes.size) && isCancelled()) {
+                                throw SynthesisCancelled()
+                            }
                         }
                         codec.releaseOutputBuffer(outIndex, false)
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
@@ -143,36 +132,13 @@ object AudioDecoder {
                 }
             }
 
-            if (started) callback.done() else callback.error()
+            if (sink.isStarted) sink.finish() else sink.error()
         } finally {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
             runCatching { extractor.release() }
         }
     }
-
-    private fun emit(
-        callback: SynthesisCallback,
-        data: ByteArray,
-        length: Int,
-        isCancelled: () -> Boolean,
-    ) {
-        val max = callback.maxBufferSize()
-        var offset = 0
-        while (offset < length) {
-            if (isCancelled()) throw SynthesisCancelled()
-            // Keep 16-bit sample alignment.
-            val chunk = (minOf(max, length - offset) / 2) * 2
-            if (chunk <= 0) break
-            if (callback.audioAvailable(data, offset, chunk) != TextToSpeech.SUCCESS) {
-                throw SynthesisCancelled()
-            }
-            offset += chunk
-        }
-    }
-
-    private fun SynthesisCallback.maxBufferSize(): Int =
-        getMaxBufferSize().takeIf { it in 2..(1 shl 20) } ?: 4096
 
     private fun MediaFormat.intOr(key: String, fallback: Int): Int =
         if (containsKey(key)) getInteger(key) else fallback

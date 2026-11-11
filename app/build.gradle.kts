@@ -59,6 +59,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -94,4 +98,6 @@ dependencies {
 
     // Local, on-device TTS models (Kokoro / Piper / Matcha).
     implementation(libs.onnxruntime.android)
+
+    testImplementation("junit:junit:4.13.2")
 }

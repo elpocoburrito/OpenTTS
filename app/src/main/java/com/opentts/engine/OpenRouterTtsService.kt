@@ -184,22 +184,21 @@ class OpenRouterTtsService : TextToSpeechService() {
             return
         }
 
-        var started = false
+        val sink = PcmSink(CallbackTarget(callback), model.sampleRate, /* channels = */ 1) { cancelRequested }
         val began = System.currentTimeMillis()
         try {
-            callback.start(model.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
-            started = true
-
             localEngine.speak(text, model, voice, speed) { samples ->
                 if (cancelRequested) return@speak false
-                emitPcm(callback, samples) { cancelRequested }
+                val bytes = floatsToPcm16(samples)
+                sink.write(bytes, bytes.size)
             }
             Log.d(TAG, "Local synthesis finished in ${System.currentTimeMillis() - began} ms")
-            if (!cancelRequested) runCatching { callback.done() }
+            if (cancelRequested) return
+            sink.finish()
         } catch (e: Exception) {
             Log.e(TAG, "Local synthesis failed: ${e.message}", e)
-            if (!started) {
-                runCatching { callback.start(model.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1) }
+            if (!sink.isStarted) runCatching {
+                callback.start(model.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
             }
             runCatching { callback.error() }
         }
@@ -264,27 +263,15 @@ class OpenRouterTtsService : TextToSpeechService() {
         }
     }
 
-    /** Converts float PCM to 16-bit mono little-endian and feeds the framework. */
-    private fun emitPcm(
-        callback: SynthesisCallback,
-        samples: FloatArray,
-        isCancelled: () -> Boolean,
-    ): Boolean {
-        val maxShorts = (callback.maxBufferSize / 2).coerceAtLeast(1)
-        val bytes = ByteArray(min(maxShorts, samples.size).coerceAtLeast(1) * 2)
-        var index = 0
-        while (index < samples.size) {
-            if (isCancelled()) return false
-            val count = min(maxShorts, samples.size - index)
-            for (i in 0 until count) {
-                val v = (samples[index + i].coerceIn(-1f, 1f) * 32767f).toInt()
-                bytes[i * 2] = (v and 0xFF).toByte()
-                bytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
-            }
-            if (callback.audioAvailable(bytes, 0, count * 2) != TextToSpeech.SUCCESS) return false
-            index += count
+    /** Converts float samples to 16-bit mono little-endian bytes. */
+    private fun floatsToPcm16(samples: FloatArray): ByteArray {
+        val bytes = ByteArray(samples.size * 2)
+        for (i in samples.indices) {
+            val v = (samples[i].coerceIn(-1f, 1f) * 32767f).toInt()
+            bytes[i * 2] = (v and 0xFF).toByte()
+            bytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
-        return true
+        return bytes
     }
 
     /** Applies a per-utterance voice and (optionally) the caller's speech rate. */
