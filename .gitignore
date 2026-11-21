@@ -1,14 +1,54 @@
-*.iml
-.gradle
-/local.properties
-/.idea
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
-app/build
+# Gradle & build outputs
+.gradle/
+/build/
+app/build/
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+*.hprof
+
+# Native / CMake build outputs
+.externalNativeBuild/
+.cxx/
 
 # Kotlin compiler session data
 .kotlin/
+
+# Local environment, SDK paths & secrets
+local.properties
+keystore.properties
+.env
+.env.*
+
+# Signing keys & TLS certificates
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.crt
+*.cer
+
+# Downloaded models & debug outputs
+*.onnx
+selftest.wav
+*.log
+
+# IDE & editor files
+*.iml
+.idea/
+.vscode/
+/captures/
+.navigation/
+*.swp
+*~
+
+# Local agent tooling
+.pi/
+
+# OS metadata
+.DS_Store
+Thumbs.db

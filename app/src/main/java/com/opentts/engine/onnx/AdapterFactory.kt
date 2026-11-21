@@ -13,11 +13,17 @@ internal object AdapterFactory {
     ): LocalTtsEngine.Model {
         val dir = store.modelDir(model.id)
         return when (model.family) {
-            ModelFamily.KOKORO ->
+            ModelFamily.KOKORO -> {
                 KokoroModel(dir, store.voiceFile(model, voice) ?: error("no voice file"), model.sampleRate, threads, xnnpack)
+            }
 
-            ModelFamily.PIPER -> PiperModel(dir, model.sampleRate, threads, xnnpack)
-            ModelFamily.MATCHA -> MatchaModel(dir, model.sampleRate, threads, xnnpack)
+            ModelFamily.PIPER -> {
+                PiperModel(dir, model.sampleRate, threads, xnnpack)
+            }
+
+            ModelFamily.MATCHA -> {
+                MatchaModel(dir, model.sampleRate, threads, xnnpack)
+            }
         }
     }
 }
@@ -31,7 +37,6 @@ internal object AdapterFactory {
  * reflects the actual graph rather than a synthetic matrix multiply.
  */
 object ThreadTuner {
-
     private const val TAG = "ThreadTuner"
     private const val BENCH_PHONEMES =
         "həlˈoʊ wˈɜːld ðɪs ɪz ə bɛntʃmɑːɹk fɔːɹ ðə θɹɛd tjuːnɹ̩"
@@ -40,7 +45,10 @@ object ThreadTuner {
     private const val TIMED_RUNS = 2
 
     /** Winning combination for this device + model. */
-    data class Result(val threads: Int, val xnnpack: Boolean)
+    data class Result(
+        val threads: Int,
+        val xnnpack: Boolean,
+    )
 
     /**
      * Measures intra-op thread counts first, then A/Bs XNNPACK at the winning
@@ -90,16 +98,17 @@ object ThreadTuner {
         threads: Int,
         xnnpack: Boolean,
     ): Pair<Int, Long>? {
-        val adapter = runCatching { AdapterFactory.build(model, voice, store, threads, xnnpack) }
-            .onFailure { Log.w(TAG, "t$threads/xnn=$xnnpack could not build: ${it.message}") }
-            .getOrNull() ?: return null
+        val adapter =
+            runCatching { AdapterFactory.build(model, voice, store, threads, xnnpack) }
+                .onFailure { Log.w(TAG, "t$threads/xnn=$xnnpack could not build: ${it.message}") }
+                .getOrNull() ?: return null
 
         return try {
             repeat(WARMUP_RUNS) { adapter.synthesize(BENCH_PHONEMES, 1f, voice.speakerId) }
             val started = System.currentTimeMillis()
             repeat(TIMED_RUNS) { adapter.synthesize(BENCH_PHONEMES, 1f, voice.speakerId) }
             val elapsed = System.currentTimeMillis() - started
-            Log.i(TAG, "threads=$threads xnnpack=$xnnpack -> ${elapsed} ms for $TIMED_RUNS runs")
+            Log.i(TAG, "threads=$threads xnnpack=$xnnpack -> $elapsed ms for $TIMED_RUNS runs")
             threads to elapsed
         } catch (e: Exception) {
             Log.w(TAG, "t$threads/xnn=$xnnpack benchmark failed: ${e.message}")

@@ -24,13 +24,13 @@ android {
 
         externalNativeBuild {
             cmake {
-                // Android 15+ devices use 16 KB memory pages;
-                // an APK whose native libs are only 4 KB aligned is refused at
-                // install time ("App not installed").
-                arguments += listOf(
-                    "-DANDROID_STL=c++_shared",
-                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
-                )
+                // Android 15+ devices with 16 KB memory pages refuse to install
+                // APKs whose native libraries are only 4 KB aligned.
+                arguments +=
+                    listOf(
+                        "-DANDROID_STL=c++_shared",
+                        "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
+                    )
                 cppFlags += listOf("-fexceptions", "-frtti")
                 cFlags += listOf("-O2")
             }
@@ -49,7 +49,7 @@ android {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
+                "proguard-rules.pro",
             )
         }
     }

@@ -1,176 +1,184 @@
-# OpenTTS NG
+# OpenTTS
 
-An Android **Text-to-Speech engine** with three interchangeable backends:
+An Android **Text-to-Speech (TTS) engine** that lets any app using Android's system TTS API—such as ebook readers (Evie, Moon+ Reader, Librera) or accessibility tools—speak using your choice of three interchangeable backends:
 
-- **Cloud** — [OpenRouter](https://openrouter.ai) `/audio/speech` models (the
-  original OpenTTS behaviour).
-- **On device** — local ONNX models running through ONNX Runtime. No API key,
-  no network, nothing leaves the phone.
-- **Self-hosted server** — an [OpenTTS-SRV](../OpenTTS-SRV) instance on a GPU
-  machine (ONNX Runtime + CUDA). Works with a bearer token and optional mutual
-  TLS.
+- **On-device (Offline ONNX)** — Run neural voices directly on your phone using ONNX Runtime and `espeak-ng`. No API key, no internet connection after model download, and nothing leaves your device.
+- **OpenRouter (Cloud)** — Stream speech from any text-to-speech model available through [OpenRouter](https://openrouter.ai) (or a compatible `/audio/speech` API).
+- **Self-hosted server ([OpenTTS-SRV](https://github.com/elpocoburrito/OpenTTS-SRV))** — Offload synthesis to your own GPU/CPU TTS server over LAN or HTTPS, with bearer token authentication and optional mutual TLS (mTLS) client certificates.
 
-Any app that uses the platform TTS API (Evie, Moon+ Reader, …) can speak
-through either backend; you pick one in the app.
+---
 
+## Features
 
-## Local models
+- **Works with any Android TTS app** — Registers as a standard Android `TextToSpeechService`.
+- **On-demand model downloads** — The APK stays compact; local models download directly from Hugging Face into app-private storage and can be removed at any time.
+- **Smooth streaming playback** — Synthesizes the next sentence ahead of playback and enforces frame-aligned 16-bit PCM output to prevent dropouts and audio glitches.
+- **Automatic per-device tuning** — Benchmarks CPU thread counts and XNNPACK in the background on first use and warms up the local model when the service starts.
+- **Graceful backend fallback** — If your preferred backend is unavailable (for example, offline when Cloud is selected), OpenTTS can automatically fall back to another configured backend instead of failing silently.
+- **In-app diagnostics** — Records recent synthesis errors right inside the settings screen (**Last speech error**) so you can see why a reading app failed without needing `adb`.
+- **Android 15+ ready** — Native libraries are built with 16 KB page alignment for modern Android devices.
 
-| Model | Family | Size on disk | Languages | Licence |
-| --- | --- | --- | --- | --- |
-| Kokoro 82M | StyleTTS2 → ONNX (int8) | 92 MB + 0.5 MB/voice | en, es, fr, hi, it, ja, pt, zh | Apache-2.0 |
-| Matcha · LJSpeech | Matcha + HiFiGAN vocoder | 78 MB | en | Apache-2.0 / MIT |
-| Piper · Lessac / Alan / Thorsten / Siwis / DaveFX | Piper VITS | 63 MB each | en-US, en-GB, de, fr, es | MIT / model-specific |
+---
 
-Models are **downloaded on demand** from Hugging Face into
-`files/models/<id>/` and can be deleted again from the same screen. Nothing is
-bundled in the APK (which stays ~35 MB, mostly ONNX Runtime + espeak data).
+## Getting Started
 
-### How local synthesis works
+### Requirements
 
-```
-text ──► SentenceSplitter ──► espeak-ng (JNI) ──► IPA phonemes
-     ──► model adapter (Kokoro | Piper | Matcha) ──► float PCM
-     ──► 16-bit mono ──► SynthesisCallback.audioAvailable()
-```
+- Android **8.0 (API 26)** or newer (`arm64-v8a` phones/tablets or `x86_64` emulators)
 
-- **espeak-ng 1.52.0** is vendored (`app/src/main/cpp/espeak-ng`) and built with
-  the NDK, compiled without audio output, MBROLA, sonic or the async thread: we
-  only need `espeak_TextToPhonemes(..., espeakPHONEMES_IPA)`. Its data (~14 MB,
-  24 languages) is generated on the host with `espeak-ng --compile` and shipped
-  in `assets/espeak-ng-data`; it is unpacked into the app's files dir on first
-  use because espeak reads real files from disk.
-- Text is split at sentence boundaries (≤ 320 chars) so first audio arrives fast
-  and Kokoro's 510-row style matrix is never overrun. Adjacent fragments shorter
-  than 80 chars are merged to avoid paying model-startup cost per "Dr.".
-- **Kokoro**: `input_ids` + `style` (the row of `voices/<id>.bin` matching the
-  phoneme count) + `speed` → 24 kHz waveform.
-- **Piper/VITS**: espeak phoneme ids with BOS/pad/EOS interlacing + `scales`
-  (noise, 1/speed, noise_w) → 22.05 kHz audio.
-- **Matcha**: acoustic graph → 80-band mel → HiFiGAN `hifigan_v2.onnx` →
-  22.05 kHz audio.
-- Speed is applied inside the model (Kokoro `speed` tensor, Piper/Matcha
-  `length_scale = 1/speed`); the reading app's rate setting is folded in when
-  *use client rate* is enabled.
+### 1. Install OpenTTS
 
-### Voice names
+Install an APK from Releases (if available) or [build from source](#building-from-source).
 
-Local voices are exposed to the framework as `local|<modelId>/<voiceId>`
-(cloud voices stay `author/model|voice`), so both backends can coexist in the
-system voice picker. Selecting a local voice name overrides the stored backend
-for that utterance.
+### 2. Configure a Backend
 
-## Self-hosted server backend
+Open **OpenTTS** from your app launcher and choose one of the three backends at the top:
 
-Point the app at an [OpenTTS-SRV](../OpenTTS-SRV) instance and the phone becomes a
-thin client: text goes up, 16-bit PCM comes back, no model on the device.
+#### Option A: On-device (Offline ONNX)
 
-- **Server URL** — `http://192.168.1.10:8420` on the LAN, or the hostname/port of
-  the Caddy or NPM front end.
-- **Bearer token** — the server's `OPENTTS_API_TOKEN`.
-- **Connect / refresh** — `GET /health` + `GET /v1/models`; the model and voice
-  dropdowns are filled from what the server advertises, including whether the
-  model is already downloaded there.
-- **Mutual TLS** — import a PKCS#12 (`.p12`/`.pfx`, password supported) or a PEM
-  holding an unencrypted PKCS#8 private key plus its certificates. Extra
-  certificates in the bundle are trusted as a private CA, which is what a Caddy
-  or NPM setup with an internal CA needs. Files are copied into app-private
-  storage; only the client-certificate handshake uses them.
+1. Select **On device (ONNX)**.
+2. Tap **Download** on a model card (for example, **Kokoro 82M** or a **Piper** voice).
+3. Tap **Use** on the installed model, then choose a voice from **Local voice**.
+   - For **Kokoro 82M**, each individual voice is a ~0.5 MB file—tap **Download voice** the first time you pick a new voice.
+4. Once downloaded, synthesis runs 100% offline.
 
-Synthesis asks the server for `response_format=pcm` and streams the bytes
-straight into `SynthesisCallback`, taking the real sample rate from the
-`X-Sample-Rate` response header — no decoding, so latency is the server's
-synthesis time plus the network hop.
+#### Option B: OpenRouter (Cloud)
 
-Cleartext HTTP is enabled in the manifest so a plain-LAN server works without
-TLS; put Caddy in front when the server is reachable from outside.
+1. Select **OpenRouter (cloud)**.
+2. Paste your [OpenRouter](https://openrouter.ai) API key.
+3. Tap **Refresh models** and select a **Model** and **Voice**.
+4. Choose an **Audio format**:
+   - **MP3 (reliable)** — Decoded on device; automatically detects sample rate.
+   - **PCM (low latency)** — Streamed directly without decoding; set the sample rate to match your model (usually `24000` Hz).
+5. Optionally adjust **Delivery instructions**, **API base URL**, or **Request timeout**.
 
-## Project layout
+#### Option C: Self-hosted Server ([OpenTTS-SRV](https://github.com/elpocoburrito/OpenTTS-SRV))
 
-```
-app/src/main/java/com/opentts/engine/
-  OpenRouterTtsService.kt   TextToSpeechService; routes cloud vs local
-  OpenRouterClient.kt       HTTP client for /audio/speech (cloud)
-  AudioDecoder.kt           PCM passthrough + MP3/container decode (cloud)
-  ModelsRepository.kt       Cloud model catalogue
-  Settings.kt               SharedPreferences-backed configuration
-  SettingsActivity.kt       Entry point / engine config activity
-  SettingsScreen.kt         Compose settings UI
-  LocalModelsSection.kt     Local model manager UI (download/select/delete)
-  onnx/Phonemizer.kt        espeak-ng JNI wrapper + asset unpacking
-  onnx/LocalModels.kt       Model catalogue (Kokoro, Piper, Matcha)
-  onnx/ModelStore.kt        Downloads, install/remove, progress flow
-  onnx/LocalTtsEngine.kt    ONNX Runtime adapters + sentence splitter
-  onnx/WavIo.kt             WAV writer used by the debug self-test
-  server/ServerClient.kt    HTTP client for OpenTTS-SRV (/v1/models, /v1/audio/speech)
-  server/ClientCertStore.kt PKCS#12 / PEM import, client-cert TLS context
-  ServerSection.kt          Server settings UI (URL, token, models, mTLS)
-app/src/main/cpp/
-  CMakeLists.txt            NDK build: espeak-ng + JNI bridge
-  phonemizer.cpp            text -> IPA over espeak-ng
-  espeak-ng/                vendored espeak-ng 1.52.0 (GPL-3.0)
-app/src/main/assets/espeak-ng-data/   compiled espeak data (24 languages)
-app/src/main/res/xml/tts_engine.xml   Declares the config activity
-```
+Point OpenTTS at an [OpenTTS-SRV](https://github.com/elpocoburrito/OpenTTS-SRV) instance (or any compatible server exposing `/health`, `/v1/models`, and `/v1/audio/speech` returning 16-bit mono PCM with an `X-Sample-Rate` header):
 
-## Build
+1. Set up [OpenTTS-SRV](https://github.com/elpocoburrito/OpenTTS-SRV) on your desktop or home server (Docker Compose with CUDA or CPU).
+2. In OpenTTS, select **Self-hosted server**.
+3. Enter your **Server URL** (e.g., `http://192.168.1.10:8420` on your LAN, or an `https://` reverse-proxy URL).
+4. Enter the **Bearer token** (`OPENTTS_API_TOKEN` from your server's `.env`).
+5. *(Optional)* Under **Mutual TLS**, import a client certificate if your reverse proxy (e.g., Caddy or Nginx) requires mTLS:
+   - Supports **PKCS#12** (`.p12` / `.pfx`, with optional password) or **PEM** (an unencrypted PKCS#8 `PRIVATE KEY` plus its certificate chain).
+   - Extra certificates included in the bundle are trusted as a private CA alongside Android's system CAs.
+6. Tap **Connect / refresh**, then pick a **Model** and **Voice**.
+
+### 3. Test and Set as Your System TTS Engine
+
+1. Tap **Test voice** in OpenTTS to verify audio playback and adjust **Speed** as needed.
+   - Enable **Also apply the reading app's speed setting** if you want your ebook reader's speed slider to multiply with OpenTTS's speed.
+2. Tap **System settings** (or open Android **Settings → System / Accessibility → Text-to-speech output**).
+3. Set **Preferred engine** to **OpenTTS**.
+4. Open your reading app and start listening.
+
+---
+
+## On-Device Models
+
+All local models are downloaded on demand into app-private storage and can be deleted from the **On device (ONNX)** screen.
+
+| Model | Family | Download Size | Sample Rate | Voices / Languages | License |
+| --- | --- | --- | --- | --- | --- |
+| **Kokoro 82M** (int8) | StyleTTS2 → ONNX | ~92 MB + 0.5 MB/voice | 24 kHz | 54 voices (`en-US`, `en-GB`, `es`, `fr`, `hi`, `it`, `ja`, `pt-BR`, `zh`) | Apache-2.0 |
+| **Matcha · LJSpeech** | Matcha-TTS + HiFiGAN | ~78 MB | 22.05 kHz | 1 voice (`en-US`) | Apache-2.0 / MIT |
+| **Piper · Lessac** | Piper / VITS | ~63 MB | 22.05 kHz | `en-US` | MIT / model-specific |
+| **Piper · Alan** | Piper / VITS | ~63 MB | 22.05 kHz | `en-GB` | MIT / model-specific |
+| **Piper · Thorsten** | Piper / VITS | ~63 MB | 22.05 kHz | `de-DE` | MIT / model-specific |
+| **Piper · Siwis** | Piper / VITS | ~63 MB | 22.05 kHz | `fr-FR` | MIT / model-specific |
+| **Piper · DaveFX** | Piper / VITS | ~63 MB | 22.05 kHz | `es-ES` | MIT / model-specific |
+
+### Voice Names in Reading Apps
+
+If your reading app lets you pick a specific voice from the Android TTS picker, OpenTTS exposes voices using a structured naming scheme so all three backends can coexist:
+
+- **On-device:** `local|<modelId>/<voiceId>` (e.g., `local|kokoro-82m/af_heart`)
+- **Self-hosted server:** `server|<modelId>/<voiceId>`
+- **OpenRouter cloud:** `<author>/<model>|<voice>` (e.g., `hexgrad/kokoro-82m|af_heart`)
+
+Selecting a voice in a reading app routes that utterance to the matching backend when available, falling back to another ready backend if it cannot be served.
+
+---
+
+## Companion Server: OpenTTS-SRV
+
+**[OpenTTS-SRV](https://github.com/elpocoburrito/OpenTTS-SRV)** is the companion self-hosted Docker/CUDA TTS server built specifically to pair with OpenTTS (and also works with any OpenAI-compatible `/v1/audio/speech` client).
+
+### Why use OpenTTS-SRV alongside OpenTTS?
+
+- **Faster synthesis & higher quality:** Phones run compact quantized models on CPU (such as Kokoro int8). OpenTTS-SRV runs full-precision (`fp32`) and larger models on a desktop or home-server GPU with ONNX Runtime + CUDA, well faster than real time.
+- **More models & voices without using phone storage:** In addition to **Kokoro 82M (fp32)**, **Matcha**, and **Piper**, OpenTTS-SRV also serves **Kitten TTS mini** (8 English voices), **MMS-TTS**, and **VITS · VCTK** (109 English speakers)—all stored and cached on the server rather than on your phone.
+- **Low battery usage & low latency:** The Android app acts as a thin client—it sends text and streams raw 16-bit PCM back sentence by sentence with no on-device audio decoding.
+- **Private & zero per-character fees:** Everything stays on your own hardware, secured by a bearer token and optional Caddy mutual-TLS client certificates when accessed outside your LAN.
+- **Seamless offline fallback:** Because OpenTTS automatically falls back across configured backends, you can use **OpenTTS-SRV** at home and seamlessly fall back to an **On-device** model whenever your server is unreachable.
+
+See the [OpenTTS-SRV repository](https://github.com/elpocoburrito/OpenTTS-SRV) for Docker Compose setup, API documentation, and mutual-TLS instructions.
+
+---
+
+## Privacy & Permissions
+
+- **`INTERNET` & `ACCESS_NETWORK_STATE`** — Used to download on-device models (from Hugging Face / GitHub Releases) and to communicate with OpenRouter or your self-hosted server when those backends are used. In **On device** mode, once a model and voice are downloaded, no text or audio is sent over the network.
+- **Cleartext HTTP** — Enabled so self-hosted servers on a local network can be used over plain HTTP. If you expose a self-hosted server outside your LAN, put it behind HTTPS (and optionally mTLS).
+- **Credential storage** — API keys, bearer tokens, and imported client certificates are stored in Android app-private storage (isolated from other apps on non-rooted devices).
+
+---
+
+## Troubleshooting
+
+- **My reading app says "speech error":** Open the **OpenTTS** app and check **Last speech error** near the bottom of the screen for the exact failure reason.
+- **The first utterance after installing a model is slow:** The first run loads the ONNX graph and kicks off a one-time background thread benchmark. Subsequent utterances are much faster, and the model warms up automatically when the TTS service starts.
+- **OpenRouter returns HTTP 400 when speed is changed:** Some cloud providers reject non-default speed values. OpenTTS automatically retries without speed for models that reject it, or you can leave the speed slider at `1.00×`.
+- **Self-hosted server takes a long time on the first request:** If the selected model is not yet downloaded on the server, the server downloads it on first use.
+
+---
+
+## Building from Source
+
+### Prerequisites
+
+- **JDK 17**
+- **Android SDK** with platform **API 36**
+- **Android NDK** `27.1.12297006` (or compatible)
+- **CMake** `3.22.1`
+
+### Build & Install
 
 ```sh
+# Build the debug APK
+./gradlew :app:assembleDebug
+
+# Install directly to a connected device or emulator
 ./gradlew :app:installDebug
+
+# Run JVM unit tests
+./gradlew testDebugUnitTest
 ```
 
-Requires the Android SDK (platform 36), NDK 27.1.12297006+, and CMake 3.22.
-ABIs built: `arm64-v8a` (phones) and `x86_64` (emulators).
+### Architecture Overview
 
-## Measured on an emulator (API 36, x86_64)
+```text
+Text ─► SentenceSplitter ─► espeak-ng (JNI) ─► IPA phonemes
+     ─► ONNX model adapter (Kokoro | Piper | Matcha) ─► float PCM
+     ─► PcmSink (frame-aligned 16-bit mono) ─► SynthesisCallback
+```
 
-| Model | Audio produced | Synthesis time | RTF |
-| --- | --- | --- | --- |
-| Kokoro 82M int8 | 5.5 s | 4.2 s (first call, includes model load) | ~0.77 |
-| Piper Lessac | 4.3 s | 0.17 s | ~0.04 |
-| Matcha + HiFiGAN | 2.4 s | 0.10 s | ~0.04 |
+- **Phonemization:** Vendored `espeak-ng` 1.52.0 (`app/src/main/cpp/espeak-ng`) compiled via NDK/CMake without audio output dependencies, paired with compiled language data in `app/src/main/assets/espeak-ng-data` (unpacked to app-private storage on first use).
+- **ABIs:** Builds `arm64-v8a` and `x86_64` with 16 KB ELF page alignment (`-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON`, `-Wl,-z,max-page-size=16384`).
+- **Source layout:**
+  - `app/src/main/java/com/opentts/engine/` — `TextToSpeechService`, settings UI, OpenRouter client, audio decoder, frame-aligned `PcmSink`, and diagnostics.
+  - `app/src/main/java/com/opentts/engine/onnx/` — Local model catalog, downloader, `espeak-ng` JNI wrapper, ONNX Runtime adapters, lookahead synthesis pipeline, and thread tuner.
+  - `app/src/main/java/com/opentts/engine/server/` — Self-hosted server HTTP client and PKCS#12/PEM mutual-TLS certificate store.
+  - `app/src/main/cpp/` — CMake configuration, JNI bridge (`phonemizer.cpp`), and vendored `espeak-ng`.
 
-Output was cross-checked against the same pipeline run on the host with an
-identical sentence: Kokoro 143,400 host vs 144,600 device samples (0.8 %),
-Matcha 54,016 vs 53,760 (0.5 %).
+---
 
-## Notes / limits
+## License & Credits
 
-- One ONNX session is cached; switching models reloads the graph.
-- espeak is not thread-safe, so every JNI entry point takes a single mutex.
-- StyleTTS2 itself is **not** included: the published ONNX exports have
-  undocumented, opaque I/O. Kokoro is the supported StyleTTS2-lineage model.
-- No GPU/NNAPI execution provider yet; CPU with up to 4 threads.
-- Native libraries are built with 16 KB page alignment
-  (`ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON`, `-Wl,-z,max-page-size=16384`).
-  Android 15+ devices with 16 KB pages refuse to
-  install an APK whose `.so` files are only 4 KB aligned, with the generic
-  "App not installed" error. Verify with
-  `zipalign -c -P 16 -v 4 app-debug.apk` and `readelf -lW` (p_align `0x4000`).
-- espeak-ng is GPL-3.0, therefore this app is distributed under GPL-3.0
-  (see `LICENSE`).
+Because this project bundles **espeak-ng** (GPL-3.0), OpenTTS is distributed under the **GNU General Public License v3.0** — see [`LICENSE`](LICENSE) for full terms.
 
-## Cloud configuration keys
-
-Settings live in the `opentts` SharedPreferences file.
-
-| Key | Meaning |
-| --- | --- |
-| `backend` | `cloud` or `local` |
-| `api_key` | OpenRouter API key |
-| `model` | e.g. `hexgrad/kokoro-82m` |
-| `voice` | provider voice id, e.g. `af_heart` |
-| `format` | `mp3` or `pcm` |
-| `sample_rate` | PCM sample rate when `format = pcm` |
-| `speed` | playback speed multiplier |
-| `instructions` | optional delivery instructions |
-| `base_url` | API base URL (`https://openrouter.ai/api/v1`) |
-| `timeout` | HTTP read timeout in seconds |
-| `use_client_rate` | apply the caller's speech rate |
-| `catalog_json` | cached cloud model catalogue |
-| `local_model` | installed local model id, e.g. `kokoro-82m` |
-| `local_voice` | local voice id, e.g. `af_heart` |
-| `server_url` | OpenTTS-SRV base URL |
-| `server_token` | server bearer token |
-| `server_model` | model id on the server |
-| `server_voice` | voice id on the server |
+Built with:
+- [espeak-ng](https://github.com/espeak-ng/espeak-ng) (GPL-3.0)
+- [ONNX Runtime](https://onnxruntime.ai/) (MIT)
+- [Kokoro-82M](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) (Apache-2.0), [Piper](https://github.com/rhasspy/piper) (MIT), and [Matcha-TTS](https://github.com/shivammehta25/Matcha-TTS) / [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
